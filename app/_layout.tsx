@@ -27,6 +27,7 @@ export default function RootLayout() {
         <Stack.Screen name="pausesummary" options={{ headerShown: false }} />
         <Stack.Screen name="index" options={{ headerShown: false }} />
         <Stack.Screen name="pausing" options={{ headerShown: false }} />
+        <Stack.Screen name="placeinbox" options={{ headerShown: false }} />
         <Stack.Screen name="stats" options={{ headerShown: false }} />
         <Stack.Screen name="profile" options={{ headerShown: false }} />
         <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />

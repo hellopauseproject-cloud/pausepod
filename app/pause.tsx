@@ -30,7 +30,7 @@ export default function PauseScreen() {
   const handleCheckIn = () => {
     if (!selectedMode) return;
     router.push({
-      pathname: '/pausing',
+      pathname: '/placeinbox',
       params: {
         mode: selectedMode,
         category: selectedCategory ?? '',

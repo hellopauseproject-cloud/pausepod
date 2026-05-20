@@ -6,8 +6,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Animated, Easing, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { getProfile } from '../userProfile';
 
-Notifications.addNotificationResponseReceivedListener(() => {
-  router.push('/call');
+Notifications.addNotificationResponseReceivedListener((response) => {
+  const data = response.notification.request.content.data;
+  if (data?.type === 'fake_call') {
+    router.push('/call');
+  }
 });
 
 Notifications.setNotificationHandler({
@@ -90,7 +93,7 @@ export default function HomeScreen() {
 
   const sendFakeCall = async () => {
     await Notifications.scheduleNotificationAsync({
-      content: { title: 'Ring ring! 📞', body: 'Samtal från dig själv' },
+      content: { title: 'Ring ring! 📞', body: 'Samtal från dig själv', data: { type: 'fake_call' } },
       trigger: {
         type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
         seconds: 1,

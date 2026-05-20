@@ -4,7 +4,8 @@ import * as Notifications from 'expo-notifications';
 import { router } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import { Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
-import { Category, DEFAULT_CATEGORIES, saveSelectedCategories } from './pauseLogger';
+import { Category, DEFAULT_CATEGORIES, logNotificationSettingsChange, saveSelectedCategories } from './pauseLogger';
+import { getProfile } from './userProfile';
 
 const STORAGE_PATH = FileSystem.documentDirectory + 'selectedBlocks.json';
 const CATEGORIES_PATH = FileSystem.documentDirectory + 'selectedCategories.json';
@@ -18,6 +19,7 @@ const TIME_BLOCKS = [
   { id: 'early_evening', label: '🌆 Tidig kväll', time: '17:00-19:00', hour: 17 },
   { id: 'evening', label: '🌙 Kväll', time: '19:00-21:00', hour: 19 },
   { id: 'late_evening', label: '🌚 Sen kväll', time: '21:00-23:00', hour: 21 },
+  { id: 'night', label: '🌑 Natt', time: '00:00-07:00', hour: 2 },
 ];
 
 export default function SettingsScreen() {
@@ -98,7 +100,15 @@ export default function SettingsScreen() {
 
   const handleSave = async () => {
     await FileSystem.writeAsStringAsync(STORAGE_PATH, JSON.stringify(selectedBlocks));
-    await saveSelectedCategories(selectedCategories);
+    await saveSelectedCategories(
+      allCategories.filter(c => selectedCategories.includes(c.id)).map(c => c.id)
+    );
+
+    let callerName = 'Dig själv';
+    try {
+      const profile = await getProfile();
+      if (profile.name) callerName = profile.name;
+    } catch {}
 
     await Notifications.cancelAllScheduledNotificationsAsync();
     const blocks = TIME_BLOCKS.filter(b => selectedBlocks.includes(b.id));
@@ -111,18 +121,25 @@ export default function SettingsScreen() {
         if (date > new Date()) {
           await Notifications.scheduleNotificationAsync({
             content: {
-              title: 'Ring ring!📞 Samtal från dig själv.',
-              body: 'Tryck för att svara',
-              sound: true,
+              title: callerName,
+              body: 'Inkommande samtal',
+              sound: 'ringtone.wav',
+              data: { screen: 'call' },
             },
             trigger: {
               type: Notifications.SchedulableTriggerInputTypes.DATE,
               date,
+              channelId: 'incoming-call',
             },
           });
         }
       }
     }
+
+    await logNotificationSettingsChange({
+      timesPerDay: blocks.length,
+      timeSlots: blocks.map(b => ({ id: b.id, label: b.label, time: b.time })),
+    });
 
     setSaved(true);
     setHasChanges(false);
@@ -232,7 +249,7 @@ export default function SettingsScreen() {
             </View>
             <TextInput
               style={styles.labelInput}
-              placeholder="Namn"
+              placeholder="Namn på aktiviteten"
               placeholderTextColor="#444"
               value={newLabel}
               onChangeText={setNewLabel}
@@ -257,7 +274,7 @@ export default function SettingsScreen() {
         disabled={selectedBlocks.length < 2}
       >
         <Text style={styles.saveText}>
-          {saved ? '✅ Sparat!' : selectedBlocks.length < 2 ? 'Välj minst 2 tidsblock' : 'Spara'}
+          {saved ? 'Sparat!' : selectedBlocks.length < 2 ? 'Välj minst 2 tidsblock' : 'Spara'}
         </Text>
       </TouchableOpacity>
 
@@ -448,16 +465,16 @@ const styles = StyleSheet.create({
   },
   saveButtonDisabled: {
     backgroundColor: '#2a2a3e',
-    
+
   },
   saveButtonDone: {
     backgroundColor: '#27ae60',
-    
+
   },
   saveText: {
     color: 'white',
     fontSize: 18,
     fontWeight: 'bold',
-    
+
   },
 });

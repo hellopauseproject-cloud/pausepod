@@ -2,14 +2,15 @@ import { FontAwesome } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { useBLE } from '../hooks/useBLE';
+import { useBLE } from '../context/BLEContext';
+import { isInboxActive } from '../lib/inboxGuard';
 import { Category, getSelectedCategories } from './pauseLogger';
 
 export default function PauseScreen() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [selectedMode, setSelectedMode] = useState<'regulate' | 'session' | null>(null);
-  const { connectToPausePod, connectedDevice, touchEvent, isScanning } = useBLE();
+  const { bleMessage, isConnected, isScanning } = useBLE();
 
   useEffect(() => {
     const load = async () => {
@@ -17,22 +18,23 @@ export default function PauseScreen() {
       setCategories(cats);
     };
     load();
-    connectToPausePod();
   }, []);
 
   // När TOUCH_START kommer från lådan — checka in automatiskt
   useEffect(() => {
-    if (touchEvent === 'TOUCH_START' && selectedMode) {
+    if (bleMessage === 'TOUCH_START' && selectedMode && !isInboxActive()) {
       handleCheckIn();
     }
-  }, [touchEvent]);
+  }, [bleMessage]);
 
   const handleCheckIn = () => {
     if (!selectedMode) return;
+    const mode = selectedMode;
+    setSelectedMode(null); // förhindra att TOUCH_START triggar igen från bakgrunden
     router.push({
       pathname: '/placeinbox',
       params: {
-        mode: selectedMode,
+        mode,
         category: selectedCategory ?? '',
       },
     });
@@ -40,7 +42,7 @@ export default function PauseScreen() {
 
   const bleStatus = () => {
     if (isScanning) return '🔍 Söker PausePod...';
-    if (connectedDevice) return '🟢 PausePod ansluten';
+    if (isConnected) return '🟢 PausePod ansluten';
     return '⚪ PausePod ej ansluten';
   };
 

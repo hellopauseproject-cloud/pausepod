@@ -3,6 +3,7 @@ import { Audio } from 'expo-av';
 import { router } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import { AppState, Image, StyleSheet, Text, TouchableOpacity, Vibration, View } from 'react-native';
+import { isInboxActive } from '../lib/inboxGuard';
 import { getProfile } from './userProfile';
 
 const VIBRATION_PATTERN = [0, 200, 1200, 200, 1200, 200, 1200, 200, 1200];
@@ -11,6 +12,13 @@ export default function CallScreen() {
   const soundRef = useRef<Audio.Sound | null>(null);
   const [callerName, setCallerName] = useState('');
   const [callerPhoto, setCallerPhoto] = useState<string | null>(null);
+
+  // Om placeinbox är aktiv ska /call aldrig visas (NFC deep link-kapning)
+  useEffect(() => {
+    if (isInboxActive()) {
+      return; // Gör ingenting — placeinbox hanterar sin egen navigering
+    }
+  }, []);
 
   useEffect(() => {
     const loadProfile = async () => {
@@ -42,6 +50,7 @@ export default function CallScreen() {
     if (AppState.currentState === 'active') {
       setTimeout(startAudio, 1000);
     } else {
+      
       const sub = AppState.addEventListener('change', (state) => {
         if (state === 'active') {
           sub.remove();

@@ -5,21 +5,27 @@ export function useNfc(onTagFound: (tag: TagEvent) => void) {
   useEffect(() => {
     NfcManager.start();
     return () => {
-      NfcManager.cancelTechnologyRequest();
+      NfcManager.cancelTechnologyRequest().catch(() => {});
     };
   }, []);
 
   const scan = async () => {
     try {
-      await NfcManager.requestTechnology(NfcTech.Ndef);
+      await NfcManager.requestTechnology([
+        NfcTech.NfcA,
+        NfcTech.Ndef,
+        NfcTech.MifareUltralight,
+        NfcTech.MifareClassic,
+        NfcTech.IsoDep,
+      ]);
       const tag = await NfcManager.getTag();
       if (tag && onTagFound) {
         onTagFound(tag);
       }
     } catch (ex) {
-      console.warn('NFC scan failed:', ex);
+      // ignorera tyst
     } finally {
-      NfcManager.cancelTechnologyRequest();
+      NfcManager.cancelTechnologyRequest().catch(() => {});
     }
   };
 

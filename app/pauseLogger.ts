@@ -8,7 +8,7 @@ export const DEFAULT_CATEGORIES = [
 { id: 'walk', label: 'PROMENAD', emoji: '🚶' },
 { id: 'workout', label: 'TRÄNING', emoji: '💪' },
 { id: 'social', label: 'SOCIALT', emoji: '💬' },
-{ id: 'presence', label: 'STÄDA', emoji: '🧹' },
+{ id: 'clean', label: 'STÄDA', emoji: '🧹' },
 { id: 'meditate', label: 'MEDITATION', emoji: '🧘' },
 { id: 'read', label: 'LÄSNING', emoji: '📖' },
 { id: 'study', label: 'STUDIER', emoji: '✏️' },
@@ -24,11 +24,20 @@ export interface Category {
   emoji: string;
 }
 
+export interface Interruption {
+  timestamp: string;                       // ISO – när appen lämnade förgrunden
+  durationMs: number;                      // avbrottets längd i ms
+  resumedOrEnded: 'resumed' | 'ended';     // vad användaren valde
+}
+
 export interface PauseLog {
   date: string;
   duration: number;
   mode: 'regulate' | 'session';
   category?: string;
+  interruptions?: Interruption[];
+  totalInterruptionMs?: number;
+  netPauseDurationMs?: number;
 }
 
 export const saveSelectedCategories = async (categoryIds: string[]) => {
@@ -57,7 +66,12 @@ export const getSelectedCategories = async (): Promise<Category[]> => {
   }
 };
 
-export const logPause = async (duration: number, mode: 'regulate' | 'session', category?: string) => {
+export const logPause = async (
+  duration: number,
+  mode: 'regulate' | 'session',
+  category?: string,
+  interruptions?: Interruption[],
+) => {
   try {
     let logs: PauseLog[] = [];
     try {
@@ -72,6 +86,13 @@ export const logPause = async (duration: number, mode: 'regulate' | 'session', c
       category,
     };
 
+    if (interruptions && interruptions.length > 0) {
+      const totalInterruptionMs = interruptions.reduce((sum, i) => sum + i.durationMs, 0);
+      newLog.interruptions = interruptions;
+      newLog.totalInterruptionMs = totalInterruptionMs;
+      newLog.netPauseDurationMs = duration * 1000 - totalInterruptionMs;
+    }
+
     logs.push(newLog);
     await FileSystem.writeAsStringAsync(LOG_PATH, JSON.stringify(logs));
   } catch (e) {}
@@ -84,4 +105,21 @@ export const getLogs = async (): Promise<PauseLog[]> => {
   } catch (e) {
     return [];
   }
+};
+
+const NOTIFICATION_SETTINGS_LOG_PATH = FileSystem.documentDirectory + 'notificationSettingsLog.json';
+
+export const logNotificationSettingsChange = async (settings: {
+  timesPerDay: number;
+  timeSlots: { id: string; label: string; time: string }[];
+}) => {
+  try {
+    let logs: { timesPerDay: number; timeSlots: { id: string; label: string; time: string }[]; changedAt: string }[] = [];
+    try {
+      const existing = await FileSystem.readAsStringAsync(NOTIFICATION_SETTINGS_LOG_PATH);
+      logs = JSON.parse(existing);
+    } catch (e) {}
+    logs.push({ ...settings, changedAt: new Date().toISOString() });
+    await FileSystem.writeAsStringAsync(NOTIFICATION_SETTINGS_LOG_PATH, JSON.stringify(logs));
+  } catch (e) {}
 };

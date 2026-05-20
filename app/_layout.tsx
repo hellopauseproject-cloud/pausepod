@@ -1,16 +1,23 @@
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
+import { useEffect } from 'react';
 import 'react-native-reanimated';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { BLEProvider, useBLEControl } from '../context/BLEContext';
 
 export const unstable_settings = {
   anchor: '(tabs)',
 };
 
-export default function RootLayout() {
+function InnerLayout() {
   const colorScheme = useColorScheme();
+  const { connectToPausePod } = useBLEControl();
+
+  useEffect(() => {
+    connectToPausePod();
+  }, []);
 
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
@@ -27,12 +34,20 @@ export default function RootLayout() {
         <Stack.Screen name="pausesummary" options={{ headerShown: false }} />
         <Stack.Screen name="index" options={{ headerShown: false }} />
         <Stack.Screen name="pausing" options={{ headerShown: false }} />
-        <Stack.Screen name="placeinbox" options={{ headerShown: false }} />
+        <Stack.Screen name="placeinbox" options={{ headerShown: false, animation: 'none', freezeOnBlur: true }} />
         <Stack.Screen name="stats" options={{ headerShown: false }} />
         <Stack.Screen name="profile" options={{ headerShown: false }} />
         <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
       </Stack>
       <StatusBar style="auto" />
     </ThemeProvider>
+  );
+}
+
+export default function RootLayout() {
+  return (
+    <BLEProvider>
+      <InnerLayout />
+    </BLEProvider>
   );
 }

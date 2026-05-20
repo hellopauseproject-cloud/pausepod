@@ -1,28 +1,33 @@
-import { FontAwesome, FontAwesome5 } from '@expo/vector-icons';
-import * as DocumentPicker from 'expo-document-picker';
+import { FontAwesome, FontAwesome5, Ionicons } from '@expo/vector-icons';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import * as Notifications from 'expo-notifications';
 import { router } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
-import { Animated, Dimensions, Image, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
-import { DEFAULT_CATEGORIES, saveSelectedCategories } from './pauseLogger';
-import { saveProfile } from './userProfile';
+import {
+  Animated, Dimensions, Image, ScrollView, StyleSheet,
+  Text, TextInput, TouchableOpacity, View,
+} from 'react-native';
+import RecordScreen from './components/RecordScreen';
+import { DEFAULT_CATEGORIES, logNotificationSettingsChange, saveSelectedCategories } from './pauseLogger';
+import { getProfile, saveProfile } from './userProfile';
 
 const { width } = Dimensions.get('window');
 const FILES_PATH = FileSystem.documentDirectory + 'selectedFiles.json';
 const STORAGE_PATH = FileSystem.documentDirectory + 'selectedBlocks.json';
 
 const TIME_BLOCKS = [
-  { id: 'morning', label: '🌅 Morgon', time: '07:00-09:00', hour: 7 },
-  { id: 'forenoon', label: '☕ Förmiddag', time: '09:00-12:00', hour: 9 },
-  { id: 'lunch', label: '🌞 Lunch', time: '12:00-14:00', hour: 12 },
-  { id: 'afternoon', label: '🌤 Eftermiddag', time: '14:00-17:00', hour: 14 },
-  { id: 'early_evening', label: '🌆 Tidig kväll', time: '17:00-19:00', hour: 17 },
-  { id: 'evening', label: '🌙 Kväll', time: '19:00-21:00', hour: 19 },
-  { id: 'late_evening', label: '🌚 Sen kväll', time: '21:00-23:00', hour: 21 },
+  { id: 'morning',       label: '🌅 Morgon',      time: '07:00-09:00', hour: 7  },
+  { id: 'forenoon',      label: '☕ Förmiddag',   time: '09:00-12:00', hour: 9  },
+  { id: 'lunch',         label: '🌞 Lunch',        time: '12:00-14:00', hour: 12 },
+  { id: 'afternoon',     label: '🌤 Eftermiddag',  time: '14:00-17:00', hour: 14 },
+  { id: 'early_evening', label: '🌆 Tidig kväll',  time: '17:00-19:00', hour: 17 },
+  { id: 'evening',       label: '🌙 Kväll',        time: '19:00-21:00', hour: 19 },
+  { id: 'late_evening',  label: '🌚 Sen kväll',    time: '21:00-23:00', hour: 21 },
+  { id: 'night',         label: '🌑 Natt',          time: '00:00-07:00', hour: 2  },
 ];
 
+// ─── Step 1 ───────────────────────────────────────────────────────────────────
 function Step1({ onNext }: { onNext: () => void }) {
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const scaleAnim = useRef(new Animated.Value(0.8)).current;
@@ -54,6 +59,7 @@ function Step1({ onNext }: { onNext: () => void }) {
   );
 }
 
+// ─── Step 2 ───────────────────────────────────────────────────────────────────
 function Step2({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
   const [name, setName] = useState('');
   const [photo, setPhoto] = useState<string | null>(null);
@@ -106,7 +112,7 @@ function Step2({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
         </TouchableOpacity>
         <TextInput
           style={styles.nameInput}
-          placeholder="Ditt namn"
+          placeholder="För- och efternamn"
           placeholderTextColor="#555"
           value={name}
           onChangeText={setName}
@@ -125,79 +131,121 @@ function Step2({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
   );
 }
 
-function Step3({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
-  const [voiceFile, setVoiceFile] = useState<string | null>(null);
-  const [videoFile, setVideoFile] = useState<string | null>(null);
-  const fadeAnim = useRef(new Animated.Value(0)).current;
-  const micAnim = useRef(new Animated.Value(1)).current;
+// ─── Step 3 sub-components ────────────────────────────────────────────────────
 
+function FormatSelect({
+  onSelect,
+  onBack,
+  completed,
+  onProceed,
+}: {
+  onSelect: (f: 'voice' | 'video') => void;
+  onBack: () => void;
+  completed: { voice: string | null; video: string | null };
+  onProceed: () => void;
+}) {
+  const fadeAnim = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }).start();
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(micAnim, { toValue: 1.2, duration: 800, useNativeDriver: true }),
-        Animated.timing(micAnim, { toValue: 1, duration: 800, useNativeDriver: true }),
-      ])
-    ).start();
   }, []);
 
-  const pickVoiceFile = async () => {
-    const result = await DocumentPicker.getDocumentAsync({ type: 'audio/*', copyToCacheDirectory: true });
-    if (!result.canceled && result.assets[0]) {
-      const uri = result.assets[0].uri;
-      const dest = FileSystem.documentDirectory + 'voiceMessage.m4a';
-      await FileSystem.copyAsync({ from: uri, to: dest });
-      setVoiceFile(dest);
-    }
-  };
-
-  const pickVideoFile = async () => {
-    const result = await DocumentPicker.getDocumentAsync({ type: 'video/*', copyToCacheDirectory: true });
-    if (!result.canceled && result.assets[0]) {
-      const uri = result.assets[0].uri;
-      const dest = FileSystem.documentDirectory + 'videoMessage.mp4';
-      await FileSystem.copyAsync({ from: uri, to: dest });
-      setVideoFile(dest);
-    }
-  };
-
-  const handleNext = async () => {
-    await FileSystem.writeAsStringAsync(FILES_PATH, JSON.stringify({ voice: voiceFile, video: videoFile }));
-    onNext();
-  };
+  const bothDone = !!completed.voice && !!completed.video;
 
   return (
     <View style={styles.stepCentered}>
       <Animated.View style={{ opacity: fadeAnim, alignItems: 'center', width: '100%' }}>
-        <Animated.View style={{ transform: [{ scale: micAnim }], marginBottom: 40 }}>
-          <FontAwesome5 name="microphone" size={80} color="#2e86de" />
-        </Animated.View>
         <Text style={styles.stepTitle}>Spela in ditt{'\n'}meddelande</Text>
-        <Text style={styles.stepSubtitle}>Spela in en video eller ett röstmeddelande på din telefon och ladda upp det här.</Text>
-        <View style={styles.fileButtons}>
-          <TouchableOpacity style={[styles.fileButton, voiceFile && styles.fileButtonDone]} onPress={pickVoiceFile}>
-            <FontAwesome5 name="microphone" size={20} color={voiceFile ? '#27ae60' : '#2e86de'} />
-            <Text style={styles.fileButtonText}>{voiceFile ? '✅ Röst uppladdad' : 'Ladda upp röst'}</Text>
+        <Text style={styles.stepSubtitle}>
+          Spela in både ett röst- och ett videomeddelande till dig själv.
+        </Text>
+        <View style={recStyles.formatRow}>
+          <TouchableOpacity
+            style={[recStyles.formatCard, completed.voice && recStyles.formatCardDone]}
+            onPress={() => onSelect('voice')}
+          >
+            {completed.voice ? (
+              <Ionicons name="checkmark-circle" size={40} color="white" />
+            ) : (
+              <Ionicons name="mic-outline" size={40} color="#2e86de" />
+            )}
+            <Text style={[recStyles.formatLabel, completed.voice && { color: 'white' }]}>Röst</Text>
+            <Text style={recStyles.formatHint}>
+              {completed.voice ? 'Inspelad ✓' : 'Röstmeddelande'}
+            </Text>
           </TouchableOpacity>
-          <TouchableOpacity style={[styles.fileButton, videoFile && styles.fileButtonDone]} onPress={pickVideoFile}>
-            <FontAwesome5 name="video" size={20} color={videoFile ? '#27ae60' : '#2e86de'} />
-            <Text style={styles.fileButtonText}>{videoFile ? '✅ Video uppladdad' : 'Ladda upp video'}</Text>
+          <TouchableOpacity
+            style={[recStyles.formatCard, completed.video && recStyles.formatCardDone]}
+            onPress={() => onSelect('video')}
+          >
+            {completed.video ? (
+              <Ionicons name="checkmark-circle" size={40} color="white" />
+            ) : (
+              <Ionicons name="videocam-outline" size={40} color="#2e86de" />
+            )}
+            <Text style={[recStyles.formatLabel, completed.video && { color: 'white' }]}>Video</Text>
+            <Text style={recStyles.formatHint}>
+              {completed.video ? 'Inspelad ✓' : 'Videomeddelande'}
+            </Text>
           </TouchableOpacity>
         </View>
       </Animated.View>
       <View style={styles.buttonGroup}>
-        <TouchableOpacity style={styles.nextButton} onPress={handleNext}>
-          <Text style={styles.nextText}>Nästa →</Text>
-        </TouchableOpacity>
+        {bothDone && (
+          <TouchableOpacity style={styles.nextButton} onPress={onProceed}>
+            <Text style={styles.nextText}>Nästa →</Text>
+          </TouchableOpacity>
+        )}
         <TouchableOpacity onPress={onBack} style={styles.backButton}>
           <Text style={styles.backButtonText}>← Tillbaka</Text>
         </TouchableOpacity>
+        {!bothDone && (
+          <TouchableOpacity onPress={onProceed} style={styles.skipButton}>
+            <Text style={styles.skipButtonText}>Gör det senare</Text>
+          </TouchableOpacity>
+        )}
       </View>
     </View>
   );
 }
 
-// NY: Steg 4 — Välj pausaktiviteter
+// ─── Step 3 ───────────────────────────────────────────────────────────────────
+function Step3({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
+  const [format, setFormat] = useState<'voice' | 'video' | null>(null);
+  const [completed, setCompleted] = useState<{ voice: string | null; video: string | null }>({
+    voice: null,
+    video: null,
+  });
+
+  const handleFormatComplete = (f: 'voice' | 'video', savedUri: string) => {
+    setCompleted((prev) => ({ ...prev, [f]: savedUri }));
+    setFormat(null);
+  };
+
+  const handleProceed = async () => {
+    await FileSystem.writeAsStringAsync(FILES_PATH, JSON.stringify(completed));
+    onNext();
+  };
+
+  if (!format) {
+    return (
+      <FormatSelect
+        completed={completed}
+        onSelect={setFormat}
+        onBack={onBack}
+        onProceed={handleProceed}
+      />
+    );
+  }
+  return (
+    <RecordScreen
+      format={format}
+      onComplete={(savedUri: string) => handleFormatComplete(format, savedUri)}
+      onBack={() => setFormat(null)}
+    />
+  );
+}
+
+// ─── Step 4 — Välj pausaktiviteter ───────────────────────────────────────────
 function Step4({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
   const [selected, setSelected] = useState<string[]>([]);
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -254,7 +302,7 @@ function Step4({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
   );
 }
 
-// Steg 5 — Tidsblock (tidigare Step4)
+// ─── Step 5 — Tidsblock ───────────────────────────────────────────────────────
 function Step5({ onDone, onBack }: { onDone: () => void; onBack: () => void }) {
   const [selected, setSelected] = useState<string[]>([]);
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -270,6 +318,12 @@ function Step5({ onDone, onBack }: { onDone: () => void; onBack: () => void }) {
   const handleDone = async () => {
     if (selected.length < 2) return;
 
+    let callerName = 'Dig själv';
+    try {
+      const profile = await getProfile();
+      if (profile.name) callerName = profile.name;
+    } catch {}
+
     await FileSystem.writeAsStringAsync(STORAGE_PATH, JSON.stringify(selected));
     await Notifications.cancelAllScheduledNotificationsAsync();
 
@@ -283,18 +337,25 @@ function Step5({ onDone, onBack }: { onDone: () => void; onBack: () => void }) {
         if (date > new Date()) {
           await Notifications.scheduleNotificationAsync({
             content: {
-              title: 'Ring ring!📞 Samtal från dig själv.',
-              body: 'Tryck för att svara',
-              sound: true,
+              title: callerName,
+              body: 'Inkommande samtal',
+              sound: 'ringtone.wav',
+              data: { screen: 'call' },
             },
             trigger: {
               type: Notifications.SchedulableTriggerInputTypes.DATE,
               date,
+              channelId: 'incoming-call',
             },
           });
         }
       }
     }
+
+    await logNotificationSettingsChange({
+      timesPerDay: selectedBlocks.length,
+      timeSlots: selectedBlocks.map(b => ({ id: b.id, label: b.label, time: b.time })),
+    });
 
     await FileSystem.writeAsStringAsync(
       FileSystem.documentDirectory + 'onboardingDone.json',
@@ -345,6 +406,7 @@ function Step5({ onDone, onBack }: { onDone: () => void; onBack: () => void }) {
   );
 }
 
+// ─── Main flow ────────────────────────────────────────────────────────────────
 export default function OnboardingFlow() {
   const [step, setStep] = useState(0);
   const slideAnim = useRef(new Animated.Value(0)).current;
@@ -392,6 +454,7 @@ export default function OnboardingFlow() {
   );
 }
 
+// ─── Styles ───────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -507,28 +570,6 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: 'bold',
   },
-  fileButtons: {
-    width: '100%',
-    gap: 12,
-    marginTop: 32,
-  },
-  fileButton: {
-    backgroundColor: '#2a2a3e',
-    borderRadius: 16,
-    padding: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    borderWidth: 2,
-    borderColor: '#2e86de',
-  },
-  fileButtonDone: {
-    borderColor: '#27ae60',
-  },
-  fileButtonText: {
-    color: 'white',
-    fontSize: 16,
-  },
   categoryGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -610,5 +651,47 @@ const styles = StyleSheet.create({
     padding: 32,
     paddingBottom: 40,
     gap: 40,
+  },
+  skipButton: {
+    padding: 8,
+    marginTop: 4,
+  },
+  skipButtonText: {
+    color: '#444',
+    fontSize: 13,
+    textDecorationLine: 'underline',
+  },
+});
+
+// ─── Format card styles (used by FormatSelect) ────────────────────────────────
+const recStyles = StyleSheet.create({
+  formatRow: {
+    flexDirection: 'row',
+    gap: 16,
+    marginTop: 32,
+    width: '100%',
+  },
+  formatCard: {
+    flex: 1,
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: '#2a2a3e',
+    borderRadius: 20,
+    padding: 24,
+    borderWidth: 1.5,
+    borderColor: '#2a2a3e',
+  },
+  formatLabel: {
+    color: '#E8E8E8',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  formatHint: {
+    color: '#666',
+    fontSize: 12,
+  },
+  formatCardDone: {
+    borderColor: '#2e86de',
+    backgroundColor: '#1a3a5e',
   },
 });

@@ -1,36 +1,69 @@
 import { FontAwesome5 } from '@expo/vector-icons';
+import { useAudioPlayer } from 'expo-audio';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
-import { Animated, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Animated, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { useAuth } from '../contexts/AuthContext';
+import { supabase } from '../lib/supabase';
 import { getSelectedCategories } from './pauseLogger';
 
-const MESSAGES: Record<string, string> = {
-  focus:    'Du gav hjärnan ro att landa. Det är fokus på riktigt.',
-  walk:     'Rörelse nollställer. Bra val.',
-  workout:  'Kroppen och hjärnan tackar dig.',
-  social:   'Närvaro med andra är aldrig bortkastd tid.',
-  clean:    'Ett städat hem ger ett städat inre.',
-  meditate: 'Stilla sinne, starkare tankar.',
-  read:     'Du bytte scrollning mot berättelser. Bra swap.',
-  study:    'Lärande är investering i dig själv.',
-  rest:     'Vila är inte lathet — det är återhämtning.',
-  create:   'Kreativitet föds ofta i pausen.',
-  music:    'Musik helar på sätt ord inte kan.',
-  nature:   'Naturen påminner oss om vad som är på riktigt.',
-};
-
-const DEFAULT_MESSAGE = 'Varje paus är ett steg mot mer närvaro.';
 
 export default function PauseSummaryScreen() {
-  const { duration, mode, category } = useLocalSearchParams<{
+  const { user } = useAuth();
+  const { duration, category, sharedWithName, sharedSessionId } = useLocalSearchParams<{
     duration: string;
-    mode: string;
     category: string;
+    sharedWithName: string;
+    sharedSessionId: string;
   }>();
 
   const seconds = parseInt(duration ?? '0');
-  const isRegulate = mode === 'regulate';
+  const bellPlayer = useAudioPlayer(require('../assets/images/Bell.mp3'));
+
+  useEffect(() => { bellPlayer.play(); }, []);
+
   const [cat, setCat] = useState<{ id: string; emoji: string; label: string } | null>(null);
+  const [partnerStatus, setPartnerStatus] = useState<{ stillPausing: boolean; durationSecs: number } | null>(null);
+
+  // Greeting state
+  const [greetingText, setGreetingText]     = useState('');
+  const [showGreeting, setShowGreeting]     = useState(!!sharedWithName);
+  const [greetingSending, setGreetingSending] = useState(false);
+  const [greetingSent, setGreetingSent]     = useState(false);
+  const sentOpacity = useRef(new Animated.Value(0)).current;
+
+  const sendGreeting = async () => {
+    if (!greetingText.trim() || greetingSending || !user?.id || !sharedSessionId) return;
+    setGreetingSending(true);
+
+    const { data: partner } = await supabase
+      .from('pause_sessions')
+      .select('id, user_id')
+      .eq('shared_session_id', sharedSessionId)
+      .neq('user_id', user.id)
+      .limit(1)
+      .maybeSingle();
+
+    if (partner) {
+      await supabase.from('pause_messages').insert({
+        sender_id: user.id,
+        receiver_id: partner.user_id,
+        session_id: partner.id,
+        message_type: 'text',
+        text_content: greetingText.trim(),
+        delivered: false,
+      });
+    }
+
+    setGreetingSending(false);
+    setGreetingSent(true);
+    sentOpacity.setValue(0);
+    Animated.sequence([
+      Animated.timing(sentOpacity, { toValue: 1, duration: 400, useNativeDriver: true }),
+      Animated.delay(1800),
+      Animated.timing(sentOpacity, { toValue: 0, duration: 500, useNativeDriver: true }),
+    ]).start(() => setShowGreeting(false));
+  };
 
   useEffect(() => {
     const load = async () => {
@@ -42,20 +75,21 @@ export default function PauseSummaryScreen() {
     load();
   }, [category]);
 
-  const message = cat ? MESSAGES[cat.id] ?? DEFAULT_MESSAGE : DEFAULT_MESSAGE;
+  useEffect(() => {
+    if (!sharedSessionId || !user?.id) return;
+    supabase
+      .rpc('get_partner_session_status', { p_shared_id: sharedSessionId, p_my_id: user.id })
+      .maybeSingle()
+      .then(({ data, error }) => {
+        if (error) console.error('[Summary] partner fetch error:', error.message);
+        const d = data as { ended_at: string | null; duration_seconds: number | null } | null;
+        if (d) setPartnerStatus({ stillPausing: !d.ended_at, durationSecs: d.duration_seconds ?? 0 });
+      });
+  }, [sharedSessionId, user?.id]);
 
   const fadeAnim = useRef(new Animated.Value(0)).current;
-  const slideAnim = useRef(new Animated.Value(40)).current;
-  const scaleAnim = useRef(new Animated.Value(0.7)).current;
-
   useEffect(() => {
-    Animated.sequence([
-      Animated.parallel([
-        Animated.spring(scaleAnim, { toValue: 1, friction: 5, useNativeDriver: true }),
-        Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }),
-      ]),
-      Animated.timing(slideAnim, { toValue: 0, duration: 500, useNativeDriver: true }),
-    ]).start();
+    Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }).start();
   }, []);
 
   const formatTime = (secs: number) => {
@@ -69,11 +103,15 @@ export default function PauseSummaryScreen() {
   };
 
   return (
-    <View style={styles.container}>
-
-      <Animated.View style={[styles.iconContainer, { transform: [{ scale: scaleAnim }] }]}>
-        <FontAwesome5 name="check" size={32} color="white" />
-      </Animated.View>
+    <KeyboardAvoidingView
+      style={{ flex: 1 }}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+    >
+    <ScrollView
+      contentContainerStyle={styles.container}
+      keyboardShouldPersistTaps="handled"
+      showsVerticalScrollIndicator={false}
+    >
 
       <Animated.View style={{ opacity: fadeAnim, alignItems: 'center', width: '100%', gap: 20 }}>
 
@@ -85,23 +123,77 @@ export default function PauseSummaryScreen() {
 
           <View style={styles.divider} />
 
-          <View style={styles.modePill}>
-            <Text style={styles.modePillText}>
-              {isRegulate ? '⏱ REGULATE · 12 min' : '⏱ SESSION · fri tid'}
-            </Text>
-          </View>
-
           {cat && (
             <View style={styles.categoryBlock}>
               <Text style={styles.categoryEmoji}>{cat.emoji}</Text>
               <Text style={styles.categoryLabel}>{cat.label}</Text>
             </View>
           )}
+
+          {!!sharedWithName && (
+            <View style={styles.sharedRow}>
+              <FontAwesome5 name="user-friends" size={13} color="#2e86de" />
+              <Text style={styles.sharedText}>Du pausade med {sharedWithName}</Text>
+            </View>
+          )}
+
+          {!!sharedWithName && partnerStatus && (
+            <Text style={styles.partnerStatusText}>
+              {partnerStatus.stillPausing
+                ? `${sharedWithName} pausar fortfarande.`
+                : `${sharedWithName} pausade i ${formatTime(partnerStatus.durationSecs)}.`}
+            </Text>
+          )}
         </View>
 
-        <Animated.Text style={[styles.message, { transform: [{ translateY: slideAnim }] }]}>
-          "{message}"
-        </Animated.Text>
+        {showGreeting && (
+          <View style={styles.greetingSection}>
+            {greetingSent ? (
+              <Animated.View style={[styles.greetingSentWrap, { opacity: sentOpacity }]}>
+                <View style={styles.greetingSentIcon}>
+                  <FontAwesome5 name="check" size={18} color="white" />
+                </View>
+                <Text style={styles.greetingSentText}>Hälsningen skickad!</Text>
+                <Text style={styles.greetingSentSub}>
+                  {sharedWithName} får den när de öppnar appen.
+                </Text>
+              </Animated.View>
+            ) : (
+              <>
+                <Text style={styles.greetingTitle}>
+                  Skicka en hälsning till {sharedWithName}?
+                </Text>
+                <View style={styles.greetingInputWrap}>
+                  <TextInput
+                    style={styles.greetingInput}
+                    value={greetingText}
+                    onChangeText={t => { if (t.length <= 200) setGreetingText(t); }}
+                    placeholder="Skriv något…"
+                    placeholderTextColor="rgba(255,255,255,0.2)"
+                    multiline
+                    maxLength={200}
+                  />
+                  <Text style={styles.greetingCount}>{200 - greetingText.length}</Text>
+                </View>
+                <View style={styles.greetingActions}>
+                  <TouchableOpacity
+                    style={[styles.greetingSendBtn, (!greetingText.trim() || greetingSending) && styles.greetingSendBtnDisabled]}
+                    onPress={sendGreeting}
+                    disabled={!greetingText.trim() || greetingSending}
+                    activeOpacity={0.85}
+                  >
+                    <Text style={styles.greetingSendTxt}>
+                      {greetingSending ? 'Skickar…' : 'Skicka'}
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={() => setShowGreeting(false)} activeOpacity={0.6}>
+                    <Text style={styles.greetingSkipTxt}>Inte den här gången</Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
+          </View>
+        )}
 
         <TouchableOpacity
           style={styles.doneButton}
@@ -110,41 +202,21 @@ export default function PauseSummaryScreen() {
           <Text style={styles.doneText}>Tillbaka till start</Text>
         </TouchableOpacity>
 
-        <TouchableOpacity
-          style={styles.statsLink}
-          onPress={() => router.replace('/stats')}
-        >
-          <Text style={styles.statsLinkText}>Se din statistik →</Text>
-        </TouchableOpacity>
-
       </Animated.View>
-    </View>
+    </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    flex: 1,
+    flexGrow: 1,
     backgroundColor: '#0f0f1a',
     alignItems: 'center',
     justifyContent: 'center',
     padding: 32,
-    gap: 4,
-    marginBottom: 40,
-  },
-  iconContainer: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: '#27ae60',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 8,
-    shadowColor: '#27ae60',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.5,
-    shadowRadius: 20,
-    elevation: 12,
+    gap: 16,
+    paddingBottom: 48,
   },
   title: {
     fontSize: 38,
@@ -159,12 +231,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     width: '100%',
     borderWidth: 1,
-    borderColor: '#27ae60',
-    gap: 16,
-    shadowColor: '#27ae60',
+     borderColor: '#27ae60',
+         shadowColor: '#27ae60',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.15,
     shadowRadius: 12,
+    gap: 16,
   },
   cardLabel: {
     fontSize: 11,
@@ -182,20 +254,6 @@ const styles = StyleSheet.create({
     width: '50%',
     height: 1,
     backgroundColor: 'rgba(255,255,255,0.07)',
-  },
-  modePill: {
-    backgroundColor: 'rgba(46,134,222,0.12)',
-    borderRadius: 20,
-    paddingVertical: 6,
-    paddingHorizontal: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(46,134,222,0.3)',
-  },
-  modePillText: {
-    color: '#7ab8f5',
-    fontSize: 12,
-    fontWeight: 'bold',
-    letterSpacing: 1.5,
   },
   categoryBlock: {
     alignItems: 'center',
@@ -239,12 +297,124 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     letterSpacing: 1,
   },
-  statsLink: {
-    padding: 10,
-    marginBottom: 25,
+
+  partnerStatusText: {
+    fontSize: 13,
+    color: 'rgba(255,255,255,0.35)',
+    textAlign: 'center',
+    fontStyle: 'italic',
+    letterSpacing: 0.2,
   },
-  statsLinkText: {
-    color: '#2e86de',
+
+  sharedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    backgroundColor: 'rgba(46,134,222,0.1)',
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(46,134,222,0.25)',
+  },
+  sharedText: {
+    color: '#7ab8f5',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+
+  // Greeting sent confirmation
+  greetingSentWrap: {
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 12,
+  },
+  greetingSentIcon: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: '#27ae60',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#27ae60',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 10,
+    elevation: 6,
+  },
+  greetingSentSub: {
+    color: 'rgba(255,255,255,0.35)',
+    fontSize: 13,
+    textAlign: 'center',
+    lineHeight: 19,
+  },
+
+  // Greeting section
+  greetingSection: {
+    width: '100%',
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    padding: 20,
+    gap: 16,
+  },
+  greetingSentText: {
+    color: '#ffffff',
+    fontSize: 17,
+    fontWeight: '600',
+    textAlign: 'center',
+    letterSpacing: 0.2,
+  },
+  greetingTitle: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 14,
+    letterSpacing: 0.2,
+    lineHeight: 22,
+  },
+  greetingInputWrap: {
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+    padding: 14,
+    gap: 8,
+  },
+  greetingInput: {
+    color: '#ffffff',
     fontSize: 15,
+    lineHeight: 22,
+    minHeight: 60,
+  },
+  greetingCount: {
+    color: 'rgba(255,255,255,0.2)',
+    fontSize: 11,
+    textAlign: 'right',
+    letterSpacing: 0.5,
+  },
+  greetingActions: {
+    alignItems: 'center',
+    gap: 12,
+  },
+  greetingSendBtn: {
+    backgroundColor: '#2e86de',
+    paddingVertical: 12,
+    alignSelf: 'stretch',
+    alignItems: 'center',
+    borderRadius: 24,
+  },
+  greetingSendBtnDisabled: {
+    backgroundColor: 'rgba(46,134,222,0.25)',
+  },
+  greetingSendTxt: {
+    color: 'white',
+    fontSize: 14,
+    fontWeight: '600',
+    letterSpacing: 0.3,
+  },
+  greetingSkipTxt: {
+    color: 'rgba(255,255,255,0.3)',
+    fontSize: 13,
+    letterSpacing: 0.2,
   },
 });

@@ -1,12 +1,12 @@
 import { Ionicons } from '@expo/vector-icons';
-import { Audio } from 'expo-av';
+import { RecordingPresets, useAudioPlayer, useAudioPlayerStatus, useAudioRecorder } from 'expo-audio';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { useEffect, useRef, useState } from 'react';
-import { Animated, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Alert, Animated, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 const TIPS = [
   { emoji: '💭', text: 'Berätta för dig själv varför du vill ta fler pauser från telefonen' },
@@ -17,37 +17,48 @@ const TIPS = [
 
 // ─── Voice recording tab ──────────────────────────────────────────────────────
 function VoiceRecordTab({ onFileReady }: { onFileReady: (uri: string) => void }) {
+  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const previewPlayer = useAudioPlayer(null);
+  const previewStatus = useAudioPlayerStatus(previewPlayer);
+
   const [isRecording, setIsRecording] = useState(false);
   const [recordedUri, setRecordedUri] = useState<string | null>(null);
   const [seconds, setSeconds] = useState(0);
-  const recordingRef = useRef<Audio.Recording | null>(null);
+  const [recordError, setRecordError] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const pulseLoop = useRef<Animated.CompositeAnimation | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const soundRef = useRef<Audio.Sound | null>(null);
 
   const fmt = (s: number) =>
     `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 
+  useEffect(() => {
+    if (previewStatus.didJustFinish) setIsPlaying(false);
+  }, [previewStatus.didJustFinish]);
+
   const startRecording = async () => {
-    const { granted } = await Audio.requestPermissionsAsync();
-    if (!granted) return;
-    await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
-    const { recording } = await Audio.Recording.createAsync(
-      Audio.RecordingOptionsPresets.HIGH_QUALITY
-    );
-    recordingRef.current = recording;
+    setRecordError(null);
     setIsRecording(true);
     setSeconds(0);
-    timerRef.current = setInterval(() => setSeconds((s) => s + 1), 1000);
-    pulseLoop.current = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseAnim, { toValue: 1.25, duration: 600, useNativeDriver: true }),
-        Animated.timing(pulseAnim, { toValue: 1, duration: 600, useNativeDriver: true }),
-      ])
-    );
-    pulseLoop.current.start();
+    try {
+      await recorder.prepareToRecordAsync();
+      recorder.record();
+      timerRef.current = setInterval(() => setSeconds((s) => s + 1), 1000);
+      pulseLoop.current = Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnim, { toValue: 1.25, duration: 600, useNativeDriver: true }),
+          Animated.timing(pulseAnim, { toValue: 1, duration: 600, useNativeDriver: true }),
+        ])
+      );
+      pulseLoop.current.start();
+    } catch (e: any) {
+      setIsRecording(false);
+      const msg = e?.message ?? String(e);
+      setRecordError(msg.includes('permission') || msg.includes('denied')
+        ? 'Mikrofonåtkomst saknas — aktivera i Inställningar > Integritetsskydd > Mikrofon'
+        : `Fel: ${msg}`);
+    }
   };
 
   const stopRecording = async () => {
@@ -55,39 +66,32 @@ function VoiceRecordTab({ onFileReady }: { onFileReady: (uri: string) => void })
     pulseLoop.current?.stop();
     pulseAnim.setValue(1);
     setIsRecording(false);
-    if (!recordingRef.current) return;
-    await recordingRef.current.stopAndUnloadAsync();
-    const uri = recordingRef.current.getURI();
-    recordingRef.current = null;
-    await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
-    if (uri) {
-      setRecordedUri(uri);
-      onFileReady(uri);
+    try {
+      await recorder.stop();
+      const uri = recorder.uri;
+      if (uri) {
+        setRecordedUri(uri);
+        onFileReady(uri);
+      }
+    } catch (e: any) {
+      setRecordError(`Fel vid stopp: ${e?.message ?? e}`);
     }
   };
 
-  const togglePreview = async () => {
+  const togglePreview = () => {
+    if (!recordedUri) return;
     if (isPlaying) {
-      await soundRef.current?.stopAsync();
-      await soundRef.current?.unloadAsync();
-      soundRef.current = null;
+      previewPlayer.pause();
       setIsPlaying(false);
     } else {
-      if (!recordedUri) return;
-      const { sound } = await Audio.Sound.createAsync({ uri: recordedUri });
-      soundRef.current = sound;
-      sound.setOnPlaybackStatusUpdate((st) => {
-        if (st.isLoaded && st.didJustFinish) setIsPlaying(false);
-      });
-      await sound.playAsync();
+      previewPlayer.replace({ uri: recordedUri });
+      previewPlayer.play();
       setIsPlaying(true);
     }
   };
 
-  const reRecord = async () => {
-    await soundRef.current?.stopAsync();
-    await soundRef.current?.unloadAsync();
-    soundRef.current = null;
+  const reRecord = () => {
+    previewPlayer.pause();
     setIsPlaying(false);
     setRecordedUri(null);
     setSeconds(0);
@@ -95,8 +99,6 @@ function VoiceRecordTab({ onFileReady }: { onFileReady: (uri: string) => void })
 
   useEffect(() => {
     return () => {
-      recordingRef.current?.stopAndUnloadAsync();
-      soundRef.current?.unloadAsync();
       if (timerRef.current) clearInterval(timerRef.current);
     };
   }, []);
@@ -110,6 +112,10 @@ function VoiceRecordTab({ onFileReady }: { onFileReady: (uri: string) => void })
           color={isRecording ? '#e74c3c' : '#2e86de'}
         />
       </Animated.View>
+
+      {recordError && (
+        <Text style={s.errorText}>{recordError}</Text>
+      )}
 
       {(isRecording || recordedUri) && (
         <Text style={s.durationText}>{fmt(seconds)}</Text>
@@ -150,6 +156,8 @@ function VideoRecordTab({ onFileReady }: { onFileReady: (uri: string) => void })
   const [recordingReady, setRecordingReady] = useState(false);
   const [recordedUri, setRecordedUri] = useState<string | null>(null);
   const [seconds, setSeconds] = useState(0);
+  const [recordError, setRecordError] = useState<string | null>(null);
+  const [facing, setFacing] = useState<'front' | 'back'>('front');
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const readyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -157,8 +165,7 @@ function VideoRecordTab({ onFileReady }: { onFileReady: (uri: string) => void })
     `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
 
   const startRecording = async () => {
-    const { granted: audioGranted } = await Audio.requestPermissionsAsync();
-    if (!audioGranted) return;
+    setRecordError(null);
     setIsRecording(true);
     setRecordingReady(false);
     setSeconds(0);
@@ -170,8 +177,11 @@ function VideoRecordTab({ onFileReady }: { onFileReady: (uri: string) => void })
         setRecordedUri(result.uri);
         onFileReady(result.uri);
       }
-    } catch {
-      // "stopped before data could be produced" — cancelled during init, safe to ignore
+    } catch (e: any) {
+      const msg = e?.message ?? String(e);
+      if (!msg.includes('stopped before')) {
+        setRecordError(`Fel: ${msg}`);
+      }
     } finally {
       if (timerRef.current) clearInterval(timerRef.current);
       if (readyTimerRef.current) clearTimeout(readyTimerRef.current);
@@ -210,11 +220,20 @@ function VideoRecordTab({ onFileReady }: { onFileReady: (uri: string) => void })
 
   return (
     <View style={s.tabContent}>
+      {recordError && <Text style={s.errorText}>{recordError}</Text>}
       {recordedUri ? (
         <VideoUploadPreview uri={recordedUri} />
       ) : (
         <View style={s.cameraPreviewBox}>
-          <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="front" mode="video" />
+          <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing={facing} mode="video" />
+          {!isRecording && !recordedUri && (
+            <TouchableOpacity
+              style={s.flipBtn}
+              onPress={() => setFacing(f => f === 'front' ? 'back' : 'front')}
+            >
+              <Ionicons name="camera-reverse-outline" size={22} color="white" />
+            </TouchableOpacity>
+          )}
           {isRecording && (
             <View style={s.recordingBadge}>
               <View style={s.recordingDot} />
@@ -270,9 +289,15 @@ function UploadTab({
   onComplete: () => void;
   onBack: () => void;
 }) {
+  const previewPlayer = useAudioPlayer(null);
+  const previewStatus = useAudioPlayerStatus(previewPlayer);
+
   const [selected, setSelected] = useState<{ uri: string; name: string } | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const soundRef = useRef<Audio.Sound | null>(null);
+
+  useEffect(() => {
+    if (previewStatus.didJustFinish) setIsPlaying(false);
+  }, [previewStatus.didJustFinish]);
 
   const pickFile = async () => {
     if (format === 'voice') {
@@ -292,20 +317,14 @@ function UploadTab({
     }
   };
 
-  const toggleAudioPreview = async () => {
+  const toggleAudioPreview = () => {
     if (format !== 'voice' || !selected) return;
     if (isPlaying) {
-      await soundRef.current?.stopAsync();
-      await soundRef.current?.unloadAsync();
-      soundRef.current = null;
+      previewPlayer.pause();
       setIsPlaying(false);
     } else {
-      const { sound } = await Audio.Sound.createAsync({ uri: selected.uri });
-      soundRef.current = sound;
-      sound.setOnPlaybackStatusUpdate((st) => {
-        if (st.isLoaded && st.didJustFinish) setIsPlaying(false);
-      });
-      await sound.playAsync();
+      previewPlayer.replace({ uri: selected.uri });
+      previewPlayer.play();
       setIsPlaying(true);
     }
   };
@@ -315,10 +334,6 @@ function UploadTab({
     await onFileReady(selected.uri);
     onComplete();
   };
-
-  useEffect(() => {
-    return () => { soundRef.current?.unloadAsync(); };
-  }, []);
 
   if (!selected) {
     return (
@@ -501,7 +516,6 @@ export default function RecordScreen({
 }
 
 const s = StyleSheet.create({
-  // Buttons
   buttonGroup: {
     alignItems: 'center',
     width: '100%',
@@ -534,8 +548,6 @@ const s = StyleSheet.create({
     color: '#777',
     fontSize: 14,
   },
-
-  // Header
   headerRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -558,8 +570,6 @@ const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-
-  // Tabs
   tabRow: {
     flexDirection: 'row',
     justifyContent: 'center',
@@ -594,8 +604,6 @@ const s = StyleSheet.create({
     height: 2,
     backgroundColor: '#2e86de',
   },
-
-  // Tab content
   tabContent: {
     flex: 1,
     alignItems: 'center',
@@ -655,14 +663,29 @@ const s = StyleSheet.create({
     color: '#2e86de',
     fontSize: 13,
   },
-
-  // Camera
+  errorText: {
+    color: '#e74c3c',
+    fontSize: 13,
+    textAlign: 'center',
+    paddingHorizontal: 16,
+  },
   cameraPreviewBox: {
     width: 200,
     height: 280,
     borderRadius: 16,
     overflow: 'hidden',
     backgroundColor: '#000',
+  },
+  flipBtn: {
+    position: 'absolute',
+    top: 10,
+    left: 10,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   recordingBadge: {
     position: 'absolute',
@@ -692,8 +715,6 @@ const s = StyleSheet.create({
     height: 280,
     borderRadius: 16,
   },
-
-  // Upload tab
   uploadArea: {
     flex: 1,
     alignItems: 'center',
@@ -749,8 +770,6 @@ const s = StyleSheet.create({
     width: '100%',
     alignItems: 'center',
   },
-
-  // Tips modal
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',

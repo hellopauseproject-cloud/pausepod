@@ -1,496 +1,454 @@
-import { FontAwesome, FontAwesome5 } from '@expo/vector-icons';
-import { router } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
-import { Animated, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { DEFAULT_CATEGORIES, getLogs, getSelectedCategories, PauseLog } from './pauseLogger';
+import { FontAwesome, FontAwesome5, MaterialIcons } from '@expo/vector-icons';
+import { router, useFocusEffect } from 'expo-router';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  Alert, Animated, Modal, Pressable, ScrollView, StyleSheet,
+  Text, TouchableOpacity, View,
+} from 'react-native';
+import { Swipeable } from 'react-native-gesture-handler';
+import { useAuth } from '../contexts/AuthContext';
+import { supabase } from '../lib/supabase';
+import { DEFAULT_CATEGORIES, getSelectedCategories } from './pauseLogger';
 
-function FlipCard({ front, back, colorStyle }: {
-  front: React.ReactNode;
-  back: React.ReactNode;
-  colorStyle: object;
-}) {
-  const flipAnim = useRef(new Animated.Value(0)).current;
-  const [flipped, setFlipped] = useState(false);
+const MONTHS = ['jan','feb','mar','apr','maj','jun','jul','aug','sep','okt','nov','dec'];
 
-  const flip = () => {
-    Animated.spring(flipAnim, {
-      toValue: flipped ? 0 : 1,
-      useNativeDriver: true,
-      friction: 8,
-    }).start();
-    setFlipped(!flipped);
-  };
-
-  const frontInterpolate = flipAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['0deg', '180deg'],
-  });
-
-  const backInterpolate = flipAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['180deg', '360deg'],
-  });
-
-  return (
-    <TouchableOpacity onPress={flip} activeOpacity={1} style={styles.flipContainer}>
-      <Animated.View style={[styles.card, colorStyle, { transform: [{ rotateY: frontInterpolate }], backfaceVisibility: 'hidden' }]}>
-        {front}
-        <Text style={styles.flipHint}>Tryck för mer info</Text>
-      </Animated.View>
-      <Animated.View style={[styles.card, styles.cardBack, { transform: [{ rotateY: backInterpolate }], backfaceVisibility: 'hidden', position: 'absolute' }]}>
-        {back}
-      </Animated.View>
-    </TouchableOpacity>
-  );
+function fmtDate(iso: string) {
+  const d = new Date(iso);
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${d.getDate()} ${MONTHS[d.getMonth()]} · ${hh}:${mm}`;
 }
 
+function fmtDur(secs: number) {
+  if (secs < 60) return `${secs}s`;
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m} min`;
+}
+
+function fmtTotal(secs: number) {
+  if (secs === 0) return '—';
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+function fmtIntention(raw: string | null, categoryMap: Record<string, string>) {
+  if (!raw) return '—';
+  if (categoryMap[raw]) return categoryMap[raw];
+  const builtIn: Record<string, string> = {
+    focus: 'Fokus', walk: 'Promenad', workout: 'Träning', social: 'Socialt',
+    clean: 'Städa', meditate: 'Meditation', read: 'Läsning', study: 'Studier',
+    rest: 'Vila', create: 'Skapande', music: 'Musik', nature: 'Natur',
+  };
+  if (builtIn[raw]) return builtIn[raw];
+  return raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
+}
+
+type MsgData = {
+  id: string; senderId: string; senderName: string;
+  text: string; delivered: boolean; createdAt: string;
+};
+
+type SessionItem = {
+  id: string; durationSecs: number; intention: string | null;
+  startedAt: string; sharedSessionId: string | null;
+  friendName: string | null; msg: MsgData | null;
+  withPod: boolean | null;
+};
+
+// Modul-nivå — överlever remount inom samma app-session
+const _readIds = new Set<string>();
+
 export default function StatsScreen() {
-  const [logs, setLogs] = useState<PauseLog[]>([]);
-  const [allCategories, setAllCategories] = useState(DEFAULT_CATEGORIES);
-  const fadeAnim = useState(new Animated.Value(0))[0];
+  const { user } = useAuth();
+  const [totalPauses, setTotalPauses] = useState(0);
+  const [totalSecs, setTotalSecs]     = useState(0);
+  const [avgSecs, setAvgSecs]         = useState(0);
+  const [sessions, setSessions]       = useState<SessionItem[]>([]);
+  const [visibleCount, setVisibleCount] = useState(10);
+  const [selectedMsg, setSelectedMsg] = useState<MsgData | null>(null);
+  const [categoryMap, setCategoryMap] = useState<Record<string, string>>({});
+  const fadeAnim     = useRef(new Animated.Value(0)).current;
+  const dataFadeAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    const load = async () => {
-      const data = await getLogs();
-      setLogs(data);
-
-      // Hämta alla kategorier inkl. egna
-      const selected = await getSelectedCategories();
-      if (selected.length > 0) setAllCategories(selected);
-
-      Animated.timing(fadeAnim, {
-        toValue: 1,
-        duration: 800,
-        useNativeDriver: true,
-      }).start();
-    };
-    load();
+    getSelectedCategories().then(cats => {
+      const all = [...DEFAULT_CATEGORIES, ...cats];
+      const map: Record<string, string> = {};
+      all.forEach(c => { map[c.id] = c.label; });
+      setCategoryMap(map);
+    });
   }, []);
 
-  const totalPauses = logs.length;
-  const totalSeconds = logs.reduce((sum, l) => sum + l.duration, 0);
-  const averagePause = logs.length > 0 ? Math.round(totalSeconds / totalPauses) : 0;
-  const regulateCount = logs.filter(l => l.mode === 'regulate').length;
-  const sessionCount = logs.filter(l => l.mode === 'session').length;
+  useFocusEffect(useCallback(() => {
+    if (!user?.id) return;
+    setVisibleCount(10);
+    fadeAnim.setValue(0);
+    dataFadeAnim.setValue(0);
+    Animated.timing(fadeAnim, { toValue: 1, duration: 400, useNativeDriver: true }).start();
 
-  const today = new Date().toDateString();
-  const todaySeconds = logs
-    .filter(l => new Date(l.date).toDateString() === today)
-    .reduce((sum, l) => sum + l.duration, 0);
+    (async () => {
+      const { data: all } = await supabase
+        .from('pause_sessions')
+        .select('id, duration_seconds, intention, started_at, shared_session_id, with_pod')
+        .eq('user_id', user.id)
+        .not('ended_at', 'is', null)
+        .order('started_at', { ascending: false });
 
-  const weekAgo = new Date();
-  weekAgo.setDate(weekAgo.getDate() - 7);
-  const weekSeconds = logs
-    .filter(l => new Date(l.date) >= weekAgo)
-    .reduce((sum, l) => sum + l.duration, 0);
+      const rows = all ?? [];
+      const total   = rows.length;
+      const totSec  = rows.reduce((s, r) => s + (r.duration_seconds ?? 0), 0);
+      setTotalPauses(total);
+      setTotalSecs(totSec);
+      setAvgSecs(total > 0 ? Math.round(totSec / total) : 0);
 
-  // Kategorier-statistik
-  const categoryCounts = logs.reduce((acc, l) => {
-    if (l.category) acc[l.category] = (acc[l.category] ?? 0) + 1;
-    return acc;
-  }, {} as Record<string, number>);
+      const recent = rows;
+      const ids    = recent.map(r => r.id);
 
-  const topCategories = allCategories
-    .map(cat => ({ ...cat, count: categoryCounts[cat.id] ?? 0 }))
-    .filter(cat => cat.count > 0)
-    .sort((a, b) => b.count - a.count)
-    .slice(0, 5);
+      // Messages where I am receiver
+      let msgMap: Record<string, MsgData> = {};
+      if (ids.length > 0) {
+        const { data: msgs } = await supabase
+          .from('pause_messages')
+          .select('id, sender_id, session_id, text_content, delivered, created_at')
+          .eq('receiver_id', user.id)
+          .eq('message_type', 'text')
+          .in('session_id', ids);
 
-  const maxCount = topCategories.length > 0 ? topCategories[0].count : 1;
+        const sIds = [...new Set((msgs ?? []).map(m => m.sender_id))];
+        let sMap: Record<string, string> = {};
+        if (sIds.length > 0) {
+          const { data: ps } = await supabase.from('profiles').select('id, username').in('id', sIds);
+          sMap = Object.fromEntries((ps ?? []).map(p => [p.id, p.username ?? '?']));
+        }
+        for (const m of (msgs ?? [])) {
+          msgMap[m.session_id] = {
+            id: m.id, senderId: m.sender_id, senderName: sMap[m.sender_id] ?? '?',
+            text: m.text_content ?? '', delivered: m.delivered ?? false, createdAt: m.created_at,
+          };
+        }
+      }
 
-  const formatTime = (secs: number) => {
-    if (secs < 60) return `${secs} sek`;
-    const h = Math.floor(secs / 3600);
-    const m = Math.floor((secs % 3600) / 60);
-    if (h > 0) return `${h}h ${m}min`;
-    return `${m} min`;
+      // Friend names for shared sessions
+      const sharedIds = recent.filter(r => r.shared_session_id).map(r => r.shared_session_id!);
+      let friendMap: Record<string, string> = {};
+      if (sharedIds.length > 0) {
+        const { data: partners } = await supabase
+          .from('pause_sessions')
+          .select('shared_session_id, user_id')
+          .in('shared_session_id', sharedIds)
+          .neq('user_id', user.id);
+        const pIds = [...new Set((partners ?? []).map(p => p.user_id))];
+        if (pIds.length > 0) {
+          const { data: profs } = await supabase.from('profiles').select('id, username').in('id', pIds);
+          const pNameMap = Object.fromEntries((profs ?? []).map(p => [p.id, p.username ?? '?']));
+          for (const p of (partners ?? [])) {
+            if (p.shared_session_id) friendMap[p.shared_session_id] = pNameMap[p.user_id] ?? '?';
+          }
+        }
+      }
+
+      setSessions(recent.map(r => ({
+        id: r.id,
+        durationSecs: r.duration_seconds ?? 0,
+        intention: r.intention,
+        startedAt: r.started_at ?? '',
+        sharedSessionId: r.shared_session_id,
+        friendName: r.shared_session_id ? (friendMap[r.shared_session_id] ?? null) : null,
+        msg: msgMap[r.id] ?? null,
+        withPod: r.with_pod ?? null,
+      })));
+
+      Animated.timing(dataFadeAnim, { toValue: 1, duration: 400, useNativeDriver: true }).start();
+    })();
+  }, [user?.id]));
+
+  const deleteSession = async (id: string) => {
+    await supabase.from('pause_sessions').delete().eq('id', id).eq('user_id', user!.id);
+    setSessions(prev => prev.filter(s => s.id !== id));
+    const { data } = await supabase
+      .from('pause_sessions')
+      .select('duration_seconds')
+      .eq('user_id', user!.id)
+      .not('ended_at', 'is', null);
+    const rows = data ?? [];
+    const total = rows.length;
+    const totSec = rows.reduce((s, r) => s + (r.duration_seconds ?? 0), 0);
+    setTotalPauses(total);
+    setTotalSecs(totSec);
+    setAvgSecs(total > 0 ? Math.round(totSec / total) : 0);
   };
 
-  const getTotalComment = (secs: number) => {
-    if (secs === 0) return 'Dags att ta din första paus!';
-    if (secs < 600) return 'Bra jobbat! ';
-    if (secs < 3600) return 'Snyggt! ';
-    if (secs < 7200) return 'Inspirerande!';
-    return 'Du är en pausmästare! 🏆';
+  const confirmDelete = (id: string) => {
+    Alert.alert('Radera paus', 'Vill du radera den här pausen?', [
+      { text: 'Avbryt', style: 'cancel' },
+      { text: 'Radera', style: 'destructive', onPress: () => deleteSession(id) },
+    ]);
   };
 
-  const regulatePercent = totalPauses > 0 ? Math.round((regulateCount / totalPauses) * 100) : 0;
-  const sessionPercent = totalPauses > 0 ? Math.round((sessionCount / totalPauses) * 100) : 0;
-
-  const getModeBackText = () => {
-    if (regulateCount >= sessionCount) {
-      return 'En kort paus från skärmen räcker för att förbättra upplevt välmående. Hjärnan behöver få en stund att landa från alla intryck. ';
+  const openMsg = async (msg: MsgData) => {
+    setSelectedMsg(msg);
+    if (!msg.delivered && !_readIds.has(msg.id)) {
+      _readIds.add(msg.id);
+      setSessions(prev =>
+        prev.map(s =>
+          s.msg?.id === msg.id ? { ...s, msg: { ...s.msg!, delivered: true } } : s
+        )
+      );
+      const { error } = await supabase
+        .from('pause_messages')
+        .update({ delivered: true })
+        .eq('id', msg.id)
+        .eq('receiver_id', user!.id);
+      if (error) _readIds.delete(msg.id);
     }
-    return 'Autonomi är ett grundläggande psykologiskt behov. Att bestämma över din egen tid är inte en liten sak — det är faktiskt ganska stort. ';
   };
 
   return (
-    <ScrollView contentContainerStyle={styles.container}>
-      <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-        <FontAwesome name="chevron-left" size={16} color="#2e86de" />
-        <Text style={styles.backText}>Tillbaka</Text>
-      </TouchableOpacity>
+    <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
 
-      <Text style={styles.pageTitle}>DINA PAUSER</Text>
-
-      {/* Kort 1: Antal pauser */}
-      <Animated.View style={{ width: '100%', opacity: fadeAnim }}>
-        <FlipCard
-          colorStyle={styles.cardBlue}
-          front={
-            <>
-              <Text style={styles.cardLabel}>Du har pausat</Text>
-              <Text style={styles.cardNumber}>{totalPauses}</Text>
-              <Text style={styles.cardUnit}>gånger</Text>
-              {totalPauses === 0 && <Text style={styles.cardComment}>Ta din första paus idag!</Text>}
-            </>
-          }
-          back={
-            <>
-              <FontAwesome5 name="brain" size={36} color="white" style={{ marginBottom: 16 }} />
-              <Text style={styles.backText2}>Forskning visar att korta pauser förbättrar fokus och minskar mental utmattning.</Text>
-            </>
-          }
-        />
+      {/* Back */}
+      <Animated.View style={{ opacity: fadeAnim }}>
+        <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
+          <FontAwesome name="chevron-left" size={14} color="#2e86de" />
+          <Text style={styles.backText}>Tillbaka</Text>
+        </TouchableOpacity>
       </Animated.View>
 
-      {/* Kort 2: Total tid */}
-      <Animated.View style={{ width: '100%', opacity: fadeAnim }}>
-        <FlipCard
-          colorStyle={styles.cardDark}
-          front={
-            <>
-              <Text style={styles.cardLabel}>Total pausad tid</Text>
-              <Text style={styles.cardNumber}>{formatTime(totalSeconds)}</Text>
-              <Text style={styles.cardComment}>{getTotalComment(totalSeconds)}</Text>
-            </>
-          }
-          back={
-            <>
-              <FontAwesome5 name="book-open" size={36} color="white" style={{ marginBottom: 16 }} />
-              <Text style={styles.backText2}>Din hjärna behöver regelbunden vila för att bearbeta intryck och stärka minnet.</Text>
-            </>
-          }
-        />
+      {/* Summary card */}
+      <Animated.View style={[styles.summaryCard, { opacity: dataFadeAnim }]}>
+        <View style={styles.summaryItem}>
+          <Text style={styles.summaryNum}>{totalPauses}</Text>
+          <Text style={styles.summaryLbl}>pauser</Text>
+        </View>
+        <View style={styles.summaryDiv} />
+        <View style={styles.summaryItem}>
+          <Text style={styles.summaryNum}>{fmtTotal(totalSecs)}</Text>
+          <Text style={styles.summaryLbl}>total tid</Text>
+        </View>
+        <View style={styles.summaryDiv} />
+        <View style={styles.summaryItem}>
+          <Text style={styles.summaryNum}>{avgSecs > 0 ? fmtDur(avgSecs) : '—'}</Text>
+          <Text style={styles.summaryLbl}>snitt</Text>
+        </View>
       </Animated.View>
 
-      {/* Kort 3: Genomsnittlig paus */}
-      <Animated.View style={{ width: '100%', opacity: fadeAnim }}>
-        <FlipCard
-          colorStyle={styles.cardGreen}
-          front={
-            <>
-              <Text style={styles.cardLabel}>Genomsnittlig paus</Text>
-              <Text style={styles.cardNumber}>{formatTime(averagePause)}</Text>
-            </>
-          }
-          back={
-            <>
-              <FontAwesome5 name="heartbeat" size={36} color="white" style={{ marginBottom: 16 }} />
-              <Text style={styles.backText2}>En paus på över 10 minuter ger kroppen tid att sänka kortisolnivåerna.</Text>
-            </>
-          }
-        />
+      {/* Wrapped */}
+      <Animated.View style={{ opacity: fadeAnim }}>
+        <TouchableOpacity style={styles.wrappedBtn} onPress={() => router.push('/my-wrapped' as never)} activeOpacity={0.8}>
+          <MaterialIcons name="insights" size={14} color="#5ba8f5" />
+          <Text style={styles.wrappedBtnText}>Se veckan som gått</Text>
+        </TouchableOpacity>
       </Animated.View>
 
-      {/* Kort 4: Idag / Vecka */}
-      <Animated.View style={{ width: '100%', opacity: fadeAnim }}>
-        <FlipCard
-          colorStyle={styles.cardPurple}
-          front={
-            <>
-              <Text style={styles.cardLabel}>Din pausaktivitet</Text>
-              <View style={styles.timeRow}>
-                <View style={styles.timeBlock}>
-                  <Text style={styles.timeLabel}>⏱ Idag</Text>
-                  <Text style={styles.timeValue}>{formatTime(todaySeconds)}</Text>
+      {/* Section label */}
+      <Text style={styles.sectionLabel}>SENASTE PAUSER</Text>
+
+      {/* Session cards */}
+      {sessions.length === 0 ? (
+        <Animated.Text style={[styles.empty, { opacity: dataFadeAnim }]}>Inga pauser ännu.</Animated.Text>
+      ) : sessions.slice(0, visibleCount).map((s, i) => {
+        const isUnread = !!s.msg && !s.msg.delivered && !_readIds.has(s.msg.id);
+        return (
+          <Animated.View key={s.id} style={{ opacity: dataFadeAnim }}>
+            <Swipeable
+              renderRightActions={() => (
+                <TouchableOpacity style={styles.deleteAction} onPress={() => confirmDelete(s.id)} activeOpacity={0.85}>
+                  <FontAwesome5 name="trash" size={14} color="#fff" />
+                </TouchableOpacity>
+              )}
+            >
+              <View style={styles.sessionCard}>
+                <View style={styles.sessionCardTop}>
+                  <Text style={styles.sessionDur}>{fmtDur(s.durationSecs)}</Text>
+                  <View style={styles.sessionCardRight}>
+                    <Text style={styles.sessionDate}>{s.startedAt ? fmtDate(s.startedAt) : '—'}</Text>
+                    {s.msg && (
+                      <TouchableOpacity style={styles.mailBtn} onPress={() => openMsg(s.msg!)} activeOpacity={0.65}>
+                        <FontAwesome5 name="envelope" size={13} color={isUnread ? '#5ba8f5' : 'rgba(255,255,255,0.2)'} />
+                        {isUnread && <View style={styles.unreadDot} />}
+                      </TouchableOpacity>
+                    )}
+                  </View>
                 </View>
-                <View style={styles.timeDivider} />
-                <View style={styles.timeBlock}>
-                  <Text style={styles.timeLabel}>Vecka</Text>
-                  <Text style={styles.timeValue}>{formatTime(weekSeconds)}</Text>
+                <View style={styles.sessionTags}>
+                  {s.friendName ? (
+                    <View style={styles.tagFriend}>
+                      <FontAwesome5 name="user-friends" size={9} color="#5ba8f5" />
+                      <Text style={styles.tagFriendText}>{s.friendName}</Text>
+                    </View>
+                  ) : (
+                    <View style={styles.tagSolo}>
+                      <Text style={styles.tagSoloText}>Egen paus</Text>
+                    </View>
+                  )}
+                  {s.intention && (
+                    <View style={styles.tagIntention}>
+                      <Text style={styles.tagIntentionText}>{fmtIntention(s.intention, categoryMap)}</Text>
+                    </View>
+                  )}
+                  {s.withPod !== null && (
+                    <View style={[styles.tagPod, s.withPod && styles.tagPodActive]}>
+                      {s.withPod ? (
+                        <FontAwesome name="pause" size={9} color="rgba(91,168,245,0.7)" />
+                      ) : (
+                        <MaterialIcons name="cancel-presentation" size={14} color="rgba(255,255,255,0.25)" />
+                      )}
+                    </View>
+                  )}
                 </View>
               </View>
-            </>
-          }
-          back={
-            <>
-              <FontAwesome5 name="calendar-check" size={36} color="white" style={{ marginBottom: 16 }} />
-              <Text style={styles.backText2}>Regelbundna pauser varje dag är mer effektivt än en lång paus ibland.</Text>
-            </>
-          }
-        />
-      </Animated.View>
+            </Swipeable>
+          </Animated.View>
+        );
+      })}
 
-      {/* Kort 5: Regulate vs Session */}
-      {totalPauses > 0 && (
-        <Animated.View style={{ width: '100%', opacity: fadeAnim }}>
-          <FlipCard
-            colorStyle={styles.cardDark}
-            front={
-              <>
-                <Text style={styles.cardLabel}>Regulate vs Session</Text>
-                <View style={styles.barContainer}>
-                  <View style={styles.barRow}>
-                    <Text style={styles.barLabel}>REGULATE</Text>
-                    <View style={styles.barTrack}>
-                      <View style={[styles.barFill, styles.barBlue, { width: `${regulatePercent}%` }]} />
-                    </View>
-                    <Text style={styles.barPercent}>{regulatePercent}%</Text>
-                  </View>
-                  <View style={styles.barRow}>
-                    <Text style={styles.barLabel}>SESSION</Text>
-                    <View style={styles.barTrack}>
-                      <View style={[styles.barFill, styles.barGreen, { width: `${sessionPercent}%` }]} />
-                    </View>
-                    <Text style={styles.barPercent}>{sessionPercent}%</Text>
-                  </View>
-                </View>
-              </>
-            }
-            back={
-              <>
-                <FontAwesome5 name="lightbulb" size={36} color="white" style={{ marginBottom: 16 }} />
-                <Text style={styles.backText2}>{getModeBackText()}</Text>
-              </>
-            }
-          />
-        </Animated.View>
+      {/* Visa mer */}
+      {sessions.length > visibleCount && (
+        <TouchableOpacity style={styles.loadMoreBtn} onPress={() => setVisibleCount(v => v + 10)} activeOpacity={0.75}>
+          <Text style={styles.loadMoreText}>Visa mer</Text>
+        </TouchableOpacity>
       )}
 
-      {/* Kort 6: Topp-aktiviteter */}
-      {topCategories.length > 0 && (
-        <Animated.View style={{ width: '100%', opacity: fadeAnim }}>
-          <FlipCard
-            colorStyle={styles.cardTeal}
-            front={
-              <>
-                <Text style={styles.cardLabel}>Dina pausaktiviteter</Text>
-                <View style={styles.catContainer}>
-                  {topCategories.map(cat => (
-                    <View key={cat.id} style={styles.catRow}>
-                      <Text style={styles.catEmoji}>{cat.emoji}</Text>
-                      <Text style={styles.catName}>{cat.label}</Text>
-                      <View style={styles.catTrack}>
-                        <View style={[styles.catFill, { width: `${Math.round((cat.count / maxCount) * 100)}%` }]} />
-                      </View>
-                      <Text style={styles.catCount}>{cat.count}x</Text>
-                    </View>
-                  ))}
-                </View>
-              </>
-            }
-            back={
-              <>
-                <FontAwesome5 name="seedling" size={36} color="white" style={{ marginBottom: 16 }} />
-                <Text style={styles.backText2}>Att välja vad du gör med din tid är en av de mest grundläggande formerna av självbestämmande. Varje intentionell paus är ett litet bevis på att du är mer än dina vanor.</Text>
-              </>
-            }
-          />
-        </Animated.View>
-      )}
-
-      <TouchableOpacity style={styles.homeButton} onPress={() => router.replace('/(tabs)')}>
-        <Text style={styles.homeButtonText}>Tillbaka till start</Text>
-      </TouchableOpacity>
+      {/* Message modal */}
+      <Modal visible={!!selectedMsg} transparent animationType="fade" onRequestClose={() => setSelectedMsg(null)}>
+        <Pressable style={styles.overlay} onPress={() => setSelectedMsg(null)}>
+          <Pressable style={styles.msgCard} onPress={() => {}}>
+            <Text style={styles.msgSender}>{selectedMsg?.senderName}</Text>
+            <Text style={styles.msgText}>{selectedMsg?.text}</Text>
+            <Text style={styles.msgDate}>skickat {selectedMsg ? fmtDate(selectedMsg.createdAt) : ''}</Text>
+            <TouchableOpacity style={styles.msgCloseBtn} onPress={() => setSelectedMsg(null)} activeOpacity={0.7}>
+              <Text style={styles.msgCloseTxt}>Stäng</Text>
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    flexGrow: 1,
+    flexGrow: 1, backgroundColor: '#0f0f1a',
+    padding: 24, paddingTop: 10,
+  },
+  backBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    marginBottom: 28, marginTop: 30, alignSelf: 'flex-start',
+    paddingVertical: 10, paddingHorizontal: 4,
+  },
+  backText: { color: '#2e86de', fontSize: 15 },
+
+  // Summary
+  summaryCard: {
+    flexDirection: 'row', alignItems: 'center',
     backgroundColor: '#1a1a2e',
-    padding: 24,
-    paddingTop: 10,
-    alignItems: 'center',
+    borderRadius: 20, borderWidth: 1, borderColor: '#1e2a3a',
+    paddingVertical: 24, paddingHorizontal: 8,
+    marginBottom: 10,
   },
-  backButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    alignSelf: 'flex-start',
-    gap: 8,
-    marginBottom: 24,
-    marginTop: 30,
+  summaryItem: { flex: 1, alignItems: 'center', gap: 6 },
+  summaryNum: { fontSize: 32, fontWeight: '900', color: '#ffffff', letterSpacing: -1 },
+  summaryLbl: { fontSize: 10, color: 'rgba(255,255,255,0.3)', letterSpacing: 2, textTransform: 'uppercase' },
+  summaryDiv: { width: 1, height: 40, backgroundColor: 'rgba(255,255,255,0.07)' },
+
+  // Section label
+  sectionLabel: {
+    fontSize: 10, fontWeight: '700', color: 'rgba(255,255,255,0.3)',
+    letterSpacing: 3, textTransform: 'uppercase',
+    marginBottom: 12, marginTop: 4,
   },
-  backText: {
-    color: '#2e86de',
-    fontSize: 16,
-   
+
+  empty: { color: 'rgba(255,255,255,0.25)', fontSize: 14, paddingVertical: 16 },
+
+  deleteAction: {
+    backgroundColor: '#c0392b', justifyContent: 'center', alignItems: 'center',
+    width: 60, borderRadius: 16, marginBottom: 10,
   },
-  pageTitle: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: 'white',
-    letterSpacing: 4,
-    marginBottom: 32,
+
+  // Session card
+  sessionCard: {
+    backgroundColor: '#1a1a2e',
+    borderRadius: 16, borderWidth: 1, borderColor: '#1e2a3a',
+    padding: 16, marginBottom: 10, gap: 10,
   },
-  flipContainer: {
-    width: '100%',
-    marginBottom: 20,
-    height: 220,
+  sessionCardTop: {
+    flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between',
   },
-  card: {
-    width: '100%',
-    height: 220,
-    borderRadius: 24,
-    padding: 32,
-    alignItems: 'center',
-    justifyContent: 'center',
+  sessionCardRight: { alignItems: 'flex-end', gap: 6 },
+  sessionDur: { fontSize: 28, fontWeight: '800', color: '#ffffff', letterSpacing: -0.5 },
+  sessionDate: { fontSize: 11, color: 'rgba(255,255,255,0.28)', letterSpacing: 0.3 },
+  sessionTags: { flexDirection: 'row', gap: 6, flexWrap: 'wrap' },
+
+  tagFriend: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    backgroundColor: 'rgba(91,168,245,0.1)', borderRadius: 20,
+    paddingHorizontal: 10, paddingVertical: 4,
+    borderWidth: 1, borderColor: 'rgba(91,168,245,0.2)',
   },
-  cardBack: {
-    backgroundColor: '#16213e',
-    borderWidth: 1,
-    borderColor: '#2e86de',
+  tagFriendText: { fontSize: 11, color: '#5ba8f5', fontWeight: '600' },
+  tagSolo: {
+    backgroundColor: 'rgba(122,170,138,0.1)', borderRadius: 20,
+    paddingHorizontal: 10, paddingVertical: 4,
+    borderWidth: 1, borderColor: 'rgba(122,170,138,0.2)',
   },
-  cardBlue: { backgroundColor: '#2e86de' },
-  cardDark: { backgroundColor: '#2a2a3e' },
-  cardGreen: { backgroundColor: '#27ae60' },
-  cardPurple: { backgroundColor: '#6c3483' },
-  cardTeal: { backgroundColor: '#1a6b72' },
-  cardLabel: {
-    fontSize: 16,
-    color: 'rgba(255,255,255,0.7)',
-    marginBottom: 8,
-    letterSpacing: 1,
+  tagSoloText: { fontSize: 11, color: '#7aaa8a', fontWeight: '500' },
+  tagPod: {
+    width: 26, height: 26, borderRadius: 13,
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
+    alignItems: 'center', justifyContent: 'center',
   },
-  cardNumber: {
-    fontSize: 64,
-    fontWeight: 'bold',
-    color: 'white',
+  tagPodActive: {
+    backgroundColor: 'rgba(91,168,245,0.08)',
+    borderColor: 'rgba(91,168,245,0.25)',
   },
-  cardUnit: {
-    fontSize: 18,
-    color: 'rgba(255,255,255,0.7)',
-    marginTop: 4,
+  tagIntention: {
+    backgroundColor: 'rgba(196,181,253,0.08)', borderRadius: 20,
+    paddingHorizontal: 10, paddingVertical: 4,
+    borderWidth: 1, borderColor: 'rgba(196,181,253,0.18)',
   },
-  cardComment: {
-    fontSize: 16,
-    color: 'rgba(255,255,255,0.8)',
-    marginTop: 12,
-    textAlign: 'center',
+  tagIntentionText: { fontSize: 11, color: '#c4b5fd', fontWeight: '600' },
+
+  mailBtn: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
+  unreadDot: {
+    position: 'absolute', top: 6, right: 6,
+    width: 6, height: 6, borderRadius: 3, backgroundColor: '#5ba8f5',
   },
-  flipHint: {
-    fontSize: 11,
-    color: 'rgba(255,255,255,0.4)',
-    marginTop: 12,
-    letterSpacing: 1,
+
+  loadMoreBtn: {
+    alignSelf: 'center', paddingVertical: 10, paddingHorizontal: 28,
+    borderRadius: 20, borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)',
+    marginTop: 4, marginBottom: 16,
   },
-  backText2: {
-    fontSize: 16,
-    color: 'white',
-    textAlign: 'center',
-    lineHeight: 26,
-    paddingHorizontal: 8,
+  loadMoreText: { color: 'rgba(255,255,255,0.45)', fontSize: 13, letterSpacing: 0.8 },
+
+  // Wrapped
+  wrappedBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7,
+    backgroundColor: 'rgba(91,168,245,0.08)',
+    borderRadius: 12, borderWidth: 1, borderColor: 'rgba(91,168,245,0.2)',
+    paddingVertical: 10, paddingHorizontal: 16,
+    alignSelf: 'center', marginBottom: 20,
   },
-  timeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 16,
-    gap: 20,
+  wrappedBtnText: { color: '#5ba8f5', fontSize: 12, fontWeight: '600', letterSpacing: 0.6 },
+
+  // Message modal
+  overlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.72)',
+    justifyContent: 'center', alignItems: 'center', padding: 28,
   },
-  timeBlock: { alignItems: 'center' },
-  timeLabel: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 14,
-    marginBottom: 8,
+  msgCard: {
+    backgroundColor: '#13131f', borderRadius: 24, padding: 28,
+    width: '100%', gap: 16, borderWidth: 1, borderColor: 'rgba(91,168,245,0.12)',
   },
-  timeValue: {
-    color: 'white',
-    fontSize: 28,
-    fontWeight: 'bold',
+  msgSender: { fontSize: 11, color: 'rgba(255,255,255,0.4)', letterSpacing: 2, textTransform: 'uppercase' },
+  msgText: { fontSize: 18, color: '#ffffff', lineHeight: 28, fontWeight: '500' },
+  msgDate: { fontSize: 11, color: 'rgba(255,255,255,0.22)', letterSpacing: 0.4 },
+  msgCloseBtn: {
+    alignSelf: 'flex-end', paddingVertical: 8, paddingHorizontal: 20,
+    borderRadius: 20, borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)', marginTop: 4,
   },
-  timeDivider: {
-    width: 1,
-    height: 60,
-    backgroundColor: 'rgba(255,255,255,0.2)',
-  },
-  barContainer: {
-    width: '100%',
-    gap: 16,
-    marginTop: 16,
-  },
-  barRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  
-  },
-  barLabel: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 11,
-    width: 70,
-    letterSpacing: 1,
-  },
-  barTrack: {
-    flex: 1,
-    height: 12,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 6,
-    overflow: 'hidden',
-  },
-  barFill: {
-    height: '100%',
-    borderRadius: 6,
-  },
-  barBlue: { backgroundColor: '#2e86de' },
-  barGreen: { backgroundColor: '#27ae60' },
-  barPercent: {
-    color: 'white',
-    fontSize: 12,
-    width: 35,
-    textAlign: 'right',
-  },
-  // Kategori-kort
-  catContainer: {
-    width: '100%',
-    gap: 10,
-    marginTop: 12,
-  },
-  catRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  catEmoji: {
-    fontSize: 16,
-    width: 24,
-  },
-  catName: {
-    color: 'rgba(255,255,255,0.8)',
-    fontSize: 11,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-    width: 72,
-  },
-  catTrack: {
-    flex: 1,
-    height: 10,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 5,
-    overflow: 'hidden',
-  },
-  catFill: {
-    height: '100%',
-    borderRadius: 5,
-    backgroundColor: 'rgba(255,255,255,0.6)',
-  },
-  catCount: {
-    color: 'rgba(255,255,255,0.6)',
-    fontSize: 12,
-    width: 28,
-    textAlign: 'right',
-  },
-  homeButton: {
-    marginTop: 10,
-    marginBottom: 40,
-    backgroundColor: '#2a2a3e',
-    paddingVertical: 16,
-    paddingHorizontal: 40,
-    borderRadius: 32,
-  },
-  homeButtonText: {
-    color: '#aaa',
-    fontSize: 16,
-  },
+  msgCloseTxt: { color: 'rgba(255,255,255,0.45)', fontSize: 13, letterSpacing: 0.8 },
 });

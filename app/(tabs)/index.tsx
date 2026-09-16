@@ -1,17 +1,11 @@
 import { FontAwesome, FontAwesome5 } from '@expo/vector-icons';
-import * as FileSystem from 'expo-file-system/legacy';
 import * as Notifications from 'expo-notifications';
 import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Animated, Easing, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { getProfile } from '../userProfile';
+import { useAuth } from '../../contexts/AuthContext';
+import { supabase } from '../../lib/supabase';
 
-Notifications.addNotificationResponseReceivedListener((response) => {
-  const data = response.notification.request.content.data;
-  if (data?.type === 'fake_call') {
-    router.push('/call');
-  }
-});
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -24,44 +18,74 @@ Notifications.setNotificationHandler({
 });
 
 export default function HomeScreen() {
+  const { user } = useAuth();
   const [tapCount, setTapCount] = useState(0);
   const [showDebug, setShowDebug] = useState(false);
   const [userName, setUserName] = useState('');
+  const [pendingVoiceVideo, setPendingVoiceVideo] = useState(0);
+  const [pendingText, setPendingText] = useState(0);
 
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(24)).current;
   const greetingAnim = useRef(new Animated.Value(0)).current;
   const floatAnim = useRef(new Animated.Value(0)).current;
 
-  // Ladda namn varje gång skärmen får fokus
   useFocusEffect(
     useCallback(() => {
+      if (!user?.id) return;
       const loadProfile = async () => {
-        const profile = await getProfile();
-        if (profile.name && profile.name !== 'Dig själv') {
-          setUserName(profile.name);
-        } else {
-          setUserName('');
-        }
+        const { data } = await supabase
+          .from('profiles')
+          .select('username')
+          .eq('id', user.id)
+          .maybeSingle();
+        setUserName(data?.username ?? '');
       };
       loadProfile();
-    }, [])
+    }, [user?.id])
+  );
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!user?.id) return;
+      const checkPending = async () => {
+        const { data: myStories } = await supabase
+          .from('support_stories')
+          .select('id')
+          .eq('user_id', user.id)
+          .eq('is_active', true);
+
+        if (!myStories || myStories.length === 0) {
+          setPendingVoiceVideo(0);
+          setPendingText(0);
+          return;
+        }
+
+        const storyIds = myStories.map((s: { id: string }) => s.id);
+
+        const [{ count: vvCount }, { count: txtCount }] = await Promise.all([
+          supabase
+            .from('support_responses')
+            .select('*', { count: 'exact', head: true })
+            .in('story_id', storyIds)
+            .in('response_type', ['voice', 'video'])
+            .is('delivered_at', null),
+          supabase
+            .from('support_responses')
+            .select('*', { count: 'exact', head: true })
+            .in('story_id', storyIds)
+            .eq('response_type', 'text')
+            .is('delivered_at', null),
+        ]);
+
+        setPendingVoiceVideo(vvCount ?? 0);
+        setPendingText(txtCount ?? 0);
+      };
+      checkPending();
+    }, [user?.id])
   );
 
   useEffect(() => {
-    const checkOnboarding = async () => {
-      try {
-        await FileSystem.readAsStringAsync(
-          FileSystem.documentDirectory + 'onboardingDone.json'
-        );
-      } catch (e) {
-        setTimeout(() => {
-          router.replace('/onboarding-flow');
-        }, 100);
-      }
-    };
-    checkOnboarding();
-
     Notifications.requestPermissionsAsync();
 
     Animated.parallel([
@@ -91,9 +115,77 @@ export default function HomeScreen() {
     if (newCount >= 10) { setShowDebug(true); setTapCount(0); }
   };
 
+  const handleTextChannel = async () => {
+    if (!user?.id) return;
+
+    const { data: myStories } = await supabase
+      .from('support_stories')
+      .select('id')
+      .eq('user_id', user.id)
+      .eq('is_active', true);
+
+    if (myStories && myStories.length > 0) {
+      const { data: textResponse } = await supabase
+        .from('support_responses')
+        .select('id, text_content, sender_id')
+        .in('story_id', myStories.map((s: { id: string }) => s.id))
+        .eq('response_type', 'text')
+        .is('delivered_at', null)
+        .order('created_at', { ascending: true })
+        .limit(1)
+        .maybeSingle();
+
+      if (textResponse) {
+        const { data: sender } = await supabase
+          .from('profiles')
+          .select('username, avatar_url')
+          .eq('id', textResponse.sender_id)
+          .maybeSingle();
+
+        router.push({
+          pathname: '/text-message',
+          params: {
+            messageId: textResponse.id,
+            textContent: textResponse.text_content ?? '',
+            senderName: sender?.username ?? 'En vän',
+            senderAvatarUrl: sender?.avatar_url ?? '',
+            isSupport: 'true',
+          },
+        } as any);
+        return;
+      }
+    }
+
+    const { data: selfTexts } = await supabase
+      .from('user_self_texts')
+      .select('id, text_content')
+      .eq('user_id', user.id);
+
+    if (!selfTexts || selfTexts.length === 0) {
+      router.push({ pathname: '/text-message', params: { empty: 'true' } } as any);
+      return;
+    }
+
+    const pick = selfTexts[Math.floor(Math.random() * selfTexts.length)];
+    router.push({
+      pathname: '/text-message',
+      params: {
+        textContent: pick.text_content,
+        senderName: 'Dig själv',
+        isSupport: 'false',
+      },
+    } as any);
+  };
+
   const sendFakeCall = async () => {
+    const { data: profile } = await supabase
+      .from('profiles').select('username').eq('id', user!.id).maybeSingle();
+    const name = profile?.username ?? 'Dig själv';
+    const type = Math.random() < 0.5 ? 'call' : 'text-message';
+    const title = type === 'call' ? `${name} ringer...` : `SMS från ${name}...`;
+    const body  = type === 'call' ? 'Klicka för att svara' : 'Klicka för att läsa';
     await Notifications.scheduleNotificationAsync({
-      content: { title: 'Ring ring! 📞', body: 'Samtal från dig själv', data: { type: 'fake_call' } },
+      content: { title, body, data: { screen: type } },
       trigger: {
         type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
         seconds: 1,
@@ -116,13 +208,6 @@ export default function HomeScreen() {
     );
   };
 
-  const resetOnboarding = async () => {
-    try {
-      await FileSystem.deleteAsync(FileSystem.documentDirectory + 'onboardingDone.json');
-      Alert.alert('Klart!', 'Starta om appen för att se onboarding igen.');
-    } catch (e) {}
-  };
-
   return (
     <View style={styles.container}>
 
@@ -138,13 +223,13 @@ export default function HomeScreen() {
         </TouchableOpacity>
 
       <View style={styles.rightButtons}>
-  <TouchableOpacity style={styles.iconButton} onPress={() => router.push('/profile')}>
-    <FontAwesome5 name="user-circle" size={20} color="#2e86de" />
-  </TouchableOpacity>
-  <TouchableOpacity style={styles.iconButton} onPress={() => router.push('/onboarding')}>
-    <FontAwesome name="sliders" size={20} color="#2e86de" />
-  </TouchableOpacity>
-</View>
+        <TouchableOpacity style={styles.iconButton} onPress={() => router.push('/profile')}>
+          <FontAwesome5 name="user-circle" size={20} color="#2e86de" solid />
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.iconButton} onPress={() => router.push('/onboarding')}>
+          <FontAwesome name="sliders" size={20} color="#2e86de" />
+        </TouchableOpacity>
+      </View>
       </Animated.View>
 
       <View style={styles.center}>
@@ -167,7 +252,27 @@ export default function HomeScreen() {
             <FontAwesome name="pause" size={28} color="white" />
             <Text style={styles.pauseButtonText}>TA EN PAUS</Text>
           </TouchableOpacity>
+
         </Animated.View>
+      </View>
+
+      <View style={styles.bottomRow}>
+        <TouchableOpacity style={styles.callButton} onPress={() => router.push('/call')} activeOpacity={0.8}>
+          <FontAwesome5 name="phone-alt" size={20} color="#2e86de" />
+          {pendingVoiceVideo > 0 && (
+            <View style={styles.callBadge}>
+              <Text style={styles.callBadgeText}>{pendingVoiceVideo > 9 ? '9+' : pendingVoiceVideo}</Text>
+            </View>
+          )}
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.callButton} onPress={handleTextChannel} activeOpacity={0.8}>
+          <FontAwesome5 name="comment" size={20} color="#2e86de" solid />
+          {pendingText > 0 && (
+            <View style={styles.callBadge}>
+              <Text style={styles.callBadgeText}>{pendingText > 9 ? '9+' : pendingText}</Text>
+            </View>
+          )}
+        </TouchableOpacity>
       </View>
 
       {showDebug && (
@@ -177,9 +282,6 @@ export default function HomeScreen() {
           </TouchableOpacity>
           <TouchableOpacity style={styles.debugButton} onPress={checkScheduled}>
             <Text style={styles.debugText}>📋 Visa schemalagda notiser</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.debugButton} onPress={resetOnboarding}>
-            <Text style={styles.debugText}>🔄 Återställ onboarding</Text>
           </TouchableOpacity>
         </Animated.View>
       )}
@@ -253,6 +355,23 @@ const styles = StyleSheet.create({
   pauseButtonWrap: {
     alignItems: 'center',
   },
+  bottomRow: {
+    position: 'absolute',
+    bottom: 80,
+    alignSelf: 'center',
+    flexDirection: 'row',
+    gap: 20,
+  },
+  callButton: {
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+    backgroundColor: '#1a1a2e',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#1e2a3a',
+  },
   pauseButton: {
     backgroundColor: '#2e86de',
     flexDirection: 'row',
@@ -289,5 +408,23 @@ const styles = StyleSheet.create({
   debugText: {
     color: 'white',
     fontSize: 13,
+  },
+  callBadge: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    minWidth: 15,
+    height: 15,
+    borderRadius: 8,
+    backgroundColor: '#2e86de',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 3,
+  },
+  callBadgeText: {
+    color: '#fff',
+    fontSize: 9,
+    fontWeight: '700',
+    lineHeight: 11,
   },
 });

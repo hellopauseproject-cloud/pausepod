@@ -1,24 +1,49 @@
 import { FontAwesome } from '@expo/vector-icons';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
-import { Audio } from 'expo-av';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system/legacy';
 import { router } from 'expo-router';
 import { useVideoPlayer, VideoView } from 'expo-video';
-import { useEffect, useState } from 'react';
+import { setAudioModeAsync, useAudioPlayer } from 'expo-audio';
+import { useEffect, useRef, useState } from 'react';
 import { Animated, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { supabase } from '../lib/supabase';
+import { clearPending, getPending } from '../lib/supportQueue';
 
 export default function VideoScreen() {
+  const insets = useSafeAreaInsets();
   const [permission, requestPermission] = useCameraPermissions();
   const [showPauseLink, setShowPauseLink] = useState(false);
   const [videoUri, setVideoUri] = useState<string | null>(null);
   const [videoReady, setVideoReady] = useState(false);
   const [noFile, setNoFile] = useState(false);
   const [showReplay, setShowReplay] = useState(false);
+  const [callerName, setCallerName] = useState<string | null>(null);
   const fadeAnim = useState(new Animated.Value(0))[0];
+  const supportResponseIdRef = useRef<string | null>(null);
+
+  const pickupPlayer = useAudioPlayer(require('../assets/images/Pickupsound.mp3'));
+  const hangupPlayer = useAudioPlayer(require('../assets/images/HangUpSound.mp3'));
+  const videoEndedRef = useRef(false);
 
   useEffect(() => {
     const setup = async () => {
+      const pending = getPending();
+
+      // Support video response: play from URL
+      if (pending?.responseType === 'video' && pending.contentUrl) {
+        supportResponseIdRef.current = pending.id;
+        setCallerName(pending.senderName);
+        setVideoUri(pending.contentUrl);
+        setVideoReady(true);
+        clearPending();
+        await setAudioModeAsync({ playsInSilentMode: true, interruptionMode: 'doNotMix', shouldRouteThroughEarpiece: false });
+        pickupPlayer.play();
+        return;
+      }
+
+      // Existing behaviour: play from local file
       try {
         const savedFiles = await FileSystem.readAsStringAsync(
           FileSystem.documentDirectory + 'selectedFiles.json'
@@ -35,16 +60,12 @@ export default function VideoScreen() {
 
       setVideoReady(true);
 
-      await Audio.setAudioModeAsync({
-        playsInSilentModeIOS: true,
-        shouldDuckAndroid: false,
-        playThroughEarpieceAndroid: false,
+      await setAudioModeAsync({
+        playsInSilentMode: true,
+        interruptionMode: 'doNotMix',
+        shouldRouteThroughEarpiece: false,
       });
-      const { sound } = await Audio.Sound.createAsync(
-        require('../assets/images/Pickupsound.mp3')
-      );
-      await sound.playAsync();
-      setTimeout(() => sound.unloadAsync(), 2000);
+      pickupPlayer.play();
     };
     setup();
 
@@ -52,10 +73,10 @@ export default function VideoScreen() {
       setShowPauseLink(true);
       Animated.timing(fadeAnim, {
         toValue: 1,
-        duration: 1000,
+        duration: 600,
         useNativeDriver: true,
       }).start();
-    }, 5000);
+    }, 1500);
 
     return () => clearTimeout(pauseTimer);
   }, []);
@@ -69,21 +90,33 @@ export default function VideoScreen() {
 
   useEffect(() => {
     if (!videoReady || !videoUri) return;
+    videoEndedRef.current = false;
     player.play();
+    // iOS: pickup sound briefly claims the audio session (doNotMix) and interrupts the video
+    // player. When the pickup sound ends the video doesn't auto-resume, so we re-trigger play.
+    const iosResumeTimer = setTimeout(() => {
+      if (!videoEndedRef.current) player.play();
+    }, 1500);
     const subscription = player.addListener('playToEnd', () => {
+      videoEndedRef.current = true;
       setShowReplay(true);
     });
-    return () => subscription.remove();
+    return () => {
+      clearTimeout(iosResumeTimer);
+      subscription.remove();
+    };
   }, [videoReady, videoUri]);
 
   const handleHangUp = async () => {
+    if (videoUri) player.pause();
+    if (supportResponseIdRef.current) {
+      const ts = new Date().toISOString();
+      await supabase.from('support_responses').update({ delivered_at: ts, played_at: ts }).eq('id', supportResponseIdRef.current);
+      supportResponseIdRef.current = null;
+    }
     try {
-      const { sound } = await Audio.Sound.createAsync(
-        require('../assets/images/HangUpSound.mp3')
-      );
-      await sound.playAsync();
+      hangupPlayer.play();
       setTimeout(() => {
-        sound.unloadAsync();
         router.replace('/(tabs)');
       }, 400);
     } catch (e) {
@@ -93,10 +126,15 @@ export default function VideoScreen() {
 
   const handlePauseLink = async () => {
     if (videoUri) player.pause();
-    await Audio.setAudioModeAsync({
-      playsInSilentModeIOS: true,
-      shouldDuckAndroid: false,
-      playThroughEarpieceAndroid: false,
+    if (supportResponseIdRef.current) {
+      const ts = new Date().toISOString();
+      await supabase.from('support_responses').update({ delivered_at: ts, played_at: ts }).eq('id', supportResponseIdRef.current);
+      supportResponseIdRef.current = null;
+    }
+    await setAudioModeAsync({
+      playsInSilentMode: true,
+      interruptionMode: 'doNotMix',
+      shouldRouteThroughEarpiece: false,
     });
     router.push('/pause');
   };
@@ -116,17 +154,24 @@ export default function VideoScreen() {
 
   return (
     <View style={styles.container}>
+      {/* Video area fills remaining space above controls */}
       {noFile ? (
         <View style={styles.noFilePlaceholder}>
           <Text style={styles.noFileText}>Ingen videofil uppladdad</Text>
         </View>
       ) : (
-        <>
+        <View style={styles.videoWrapper}>
           <VideoView
             style={styles.video}
             player={player}
             nativeControls={false}
           />
+          {/* PiP camera — bottom-right corner of the video */}
+          <View style={styles.cameraContainer}>
+            <View style={styles.cameraInner}>
+              <CameraView style={styles.camera} facing="front" />
+            </View>
+          </View>
           {showReplay && (
             <TouchableOpacity
               style={styles.replayOverlay}
@@ -138,26 +183,29 @@ export default function VideoScreen() {
               <MaterialIcons name="replay" size={64} color="white" />
             </TouchableOpacity>
           )}
-        </>
-      )}
-
-      <View style={styles.cameraContainer}>
-        <View style={styles.cameraInner}>
-          <CameraView style={styles.camera} facing="front" />
         </View>
-      </View>
-
-      {showPauseLink && (
-        <Animated.View style={[styles.pauseLinkContainer, { opacity: fadeAnim }]}>
-          <TouchableOpacity onPress={handlePauseLink}>
-            <Text style={styles.pauseLink}>Tryck här för att ta en paus</Text>
-          </TouchableOpacity>
-        </Animated.View>
       )}
 
-      <TouchableOpacity style={styles.hangUpButton} onPress={handleHangUp}>
-        <FontAwesome name="phone" size={32} color="white" style={{ transform: [{ rotate: '135deg' }] }} />
-      </TouchableOpacity>
+      {!!callerName && (
+        <View style={styles.callerOverlay}>
+          <Text style={styles.callerOverlayText}>Pepp från {callerName}</Text>
+        </View>
+      )}
+
+      {/* Black controls area — pause button top, hang-up below, both centered */}
+      <View style={[styles.controlsArea, { paddingBottom: insets.bottom || 20 }]}>
+        {showPauseLink && (
+          <Animated.View style={{ opacity: fadeAnim }}>
+            <TouchableOpacity style={styles.pauseBtn} onPress={handlePauseLink} activeOpacity={0.85}>
+              <FontAwesome name="pause" size={16} color="white" />
+              <Text style={styles.pauseBtnText}>TA EN PAUS</Text>
+            </TouchableOpacity>
+          </Animated.View>
+        )}
+        <TouchableOpacity style={styles.hangUpButton} onPress={handleHangUp}>
+          <FontAwesome name="phone" size={32} color="white" style={{ transform: [{ rotate: '135deg' }] }} />
+        </TouchableOpacity>
+      </View>
     </View>
   );
 }
@@ -166,21 +214,29 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#000',
-    alignItems: 'center',
-    justifyContent: 'center',
+  },
+  videoWrapper: {
+    flex: 1,
+    width: '100%',
   },
   video: {
     width: '100%',
-    height: '75%',
-    marginTop: -80,
+    flex: 1,
   },
   noFilePlaceholder: {
+    flex: 1,
     width: '100%',
-    height: '75%',
-    marginTop: -80,
     backgroundColor: '#1a1a1a',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  controlsArea: {
+    width: '100%',
+    backgroundColor: '#000',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 16,
+    paddingTop: 20,
   },
   noFileText: {
     color: '#aaa',
@@ -188,10 +244,11 @@ const styles = StyleSheet.create({
   },
   cameraContainer: {
     position: 'absolute',
-    bottom: 215,
-    right: 20,
-    width: 100,
-    height: 150,
+    bottom: 12,
+    right: 12,
+    width: 90,
+    height: 130,
+    borderRadius: 6,
     overflow: 'hidden',
     borderWidth: 2,
     borderColor: 'white',
@@ -200,6 +257,7 @@ const styles = StyleSheet.create({
   cameraInner: {
     flex: 1,
     overflow: 'hidden',
+    borderRadius: 4,
   },
   camera: { flex: 1 },
   replayOverlay: {
@@ -207,34 +265,38 @@ const styles = StyleSheet.create({
     top: 0,
     left: 0,
     right: 0,
-    height: '75%',
-    marginTop: -10,
+    bottom: 0,
     backgroundColor: 'rgba(0,0,0,0.6)',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  pauseLink: {
-    color: '#2e86de',
-    fontSize: 16,
-    textDecorationLine: 'underline',
-    marginVertical: 10,
+  pauseBtn: {
+    backgroundColor: '#2e86de',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 14,
+    paddingHorizontal: 28,
+    borderRadius: 40,
+    shadowColor: '#2e86de',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.4,
+    shadowRadius: 16,
+    elevation: 10,
+  },
+  pauseBtnText: {
+    color: 'white',
+    fontSize: 15,
+    fontWeight: '700',
+    letterSpacing: 3,
   },
   hangUpButton: {
-    marginTop: 40,
     backgroundColor: '#e74c3c',
-    width: 80,
-    height: 80,
-    borderRadius: 40,
+    width: 72,
+    height: 72,
+    borderRadius: 36,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 20,
-  },
-  pauseLinkContainer: {
-    position: 'absolute',
-    bottom: 170,
-    alignItems: 'center',
-    zIndex: 10,
-    elevation: 20,
   },
   permissionButton: {
     marginTop: 20,
@@ -244,5 +306,21 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  callerOverlay: {
+    position: 'absolute',
+    top: 60,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 20,
+    zIndex: 10,
+  },
+  callerOverlayText: {
+    color: '#c4b5fd',
+    fontSize: 13,
+    fontWeight: '600',
+    letterSpacing: 0.3,
   },
 });

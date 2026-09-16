@@ -9,13 +9,24 @@
       "distribution": "internal"
     },
     "preview": {
-      "distribution": "internal"
+      "distribution": "store",
+      "autoIncrement": true,
+      "android": {
+        "buildType": "apk"
+      }
     },
     "production": {
       "autoIncrement": true
     }
   },
   "submit": {
+    "preview": {
+      "ios": {
+        "appleId": "peacefulpapaya.studio@gmail.com",
+        "ascAppId": "6771166351",
+        "appleTeamId": "FP3247F8DV"
+      }
+    },
     "production": {}
   }
 }

@@ -1,9 +1,10 @@
 import { Entypo, FontAwesome, FontAwesome5 } from '@expo/vector-icons';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Notifications from 'expo-notifications';
-import { router } from 'expo-router';
+import { router, useNavigation } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
-import { Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Keyboard, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import DismissKeyboardView from './components/DismissKeyboardView';
 import { Category, DEFAULT_CATEGORIES, logNotificationSettingsChange, saveSelectedCategories } from './pauseLogger';
 import { getProfile } from './userProfile';
 
@@ -30,6 +31,8 @@ export default function SettingsScreen() {
   const [newLabel, setNewLabel] = useState('');
   const [saved, setSaved] = useState(false);
   const [hasChanges, setHasChanges] = useState(false);
+  const [unsavedAction, setUnsavedAction] = useState<any>(null);
+  const navigation = useNavigation();
 
   const originalBlocks = useRef<string[]>([]);
   const originalCategories = useRef<string[]>([]);
@@ -148,24 +151,39 @@ export default function SettingsScreen() {
     setTimeout(() => setSaved(false), 2500);
   };
 
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('beforeRemove', (e: any) => {
+      if (!hasChanges) return;
+      e.preventDefault();
+      setUnsavedAction(e.data.action);
+    });
+    return unsubscribe;
+  }, [hasChanges, navigation]);
+
   const handleBack = () => {
-    if (hasChanges) {
-      Alert.alert(
-        'Spara ändringar?',
-        'Du har osparade ändringar.',
-        [
-          { text: 'Avbryt', style: 'cancel' },
-          { text: 'Lämna utan att spara', style: 'destructive', onPress: () => router.back() },
-          { text: 'Spara', onPress: async () => { await handleSave(); router.back(); } },
-        ]
-      );
-    } else {
-      router.back();
-    }
+    if (hasChanges) setUnsavedAction('back');
+    else router.back();
+  };
+
+  const handleUnsavedDiscard = () => {
+    const action = unsavedAction;
+    setUnsavedAction(null);
+    if (action === 'back') router.back();
+    else navigation.dispatch(action);
+  };
+
+  const handleUnsavedSave = async () => {
+    const action = unsavedAction;
+    setUnsavedAction(null);
+    await handleSave();
+    if (action === 'back') router.back();
+    else navigation.dispatch(action);
   };
 
   return (
-    <ScrollView contentContainerStyle={styles.container}>
+    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
+    <DismissKeyboardView>
 
       {/* Topbar */}
       <View style={styles.topBar}>
@@ -242,6 +260,8 @@ export default function SettingsScreen() {
                 value={newEmoji}
                 onChangeText={setNewEmoji}
                 maxLength={2}
+                returnKeyType="done"
+                onSubmitEditing={() => Keyboard.dismiss()}
               />
               {!newEmoji && (
                 <Entypo name="emoji-happy" size={22} color="#444" style={styles.emojiOverlay} />
@@ -255,6 +275,8 @@ export default function SettingsScreen() {
               onChangeText={setNewLabel}
               autoCapitalize="words"
               maxLength={20}
+              returnKeyType="done"
+              onSubmitEditing={addCustomCategory}
             />
             <TouchableOpacity
               style={[styles.addButton, (!newEmoji.trim() || !newLabel.trim()) && styles.addButtonDisabled]}
@@ -278,7 +300,27 @@ export default function SettingsScreen() {
         </Text>
       </TouchableOpacity>
 
+      <Modal visible={!!unsavedAction} transparent animationType="fade" onRequestClose={() => setUnsavedAction(null)}>
+        <View style={styles.unsavedOverlay}>
+          <View style={styles.unsavedSheet}>
+            <Text style={styles.unsavedTitle}>Osparade ändringar</Text>
+            <Text style={styles.unsavedBody}>Vill du spara dina ändringar innan du lämnar?</Text>
+            <TouchableOpacity style={styles.unsavedBtnSave} onPress={handleUnsavedSave}>
+              <Text style={styles.unsavedBtnSaveText}>Spara</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.unsavedBtnDiscard} onPress={handleUnsavedDiscard}>
+              <Text style={styles.unsavedBtnDiscardText}>Lämna utan att spara</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.unsavedBtnCancel} onPress={() => setUnsavedAction(null)}>
+              <Text style={styles.unsavedBtnCancelText}>Avbryt</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+    </DismissKeyboardView>
     </ScrollView>
+  </KeyboardAvoidingView>
   );
 }
 
@@ -288,7 +330,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#1a1a2e',
     padding: 24,
     paddingTop: 0,
-    paddingBottom: 50,
+    paddingBottom: 70,
 
   },
   topBar: {
@@ -300,6 +342,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
     alignSelf: 'flex-start',
+    paddingVertical: 10,
+    paddingRight: 16,
   },
   backText: {
     color: '#2e86de',
@@ -344,7 +388,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#1a3a5e',
   },
   blockLabel: {
-    fontSize: 17,
+    fontSize: 14,
     color: '#aaa',
     fontWeight: 'bold',
   },
@@ -352,7 +396,7 @@ const styles = StyleSheet.create({
     color: 'white',
   },
   blockTime: {
-    fontSize: 13,
+    fontSize: 11,
     color: '#555',
   },
   blockTimeSelected: {
@@ -361,32 +405,31 @@ const styles = StyleSheet.create({
   categoryGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 10,
-
+    gap: 7,
   },
   chip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 4,
     backgroundColor: '#2a2a3e',
     borderWidth: 1.5,
     borderColor: '#2a2a3e',
     borderRadius: 32,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
+    paddingVertical: 7,
+    paddingHorizontal: 10,
   },
   chipSelected: {
     borderColor: '#2e86de',
     backgroundColor: '#1a3a5e',
   },
   chipEmoji: {
-    fontSize: 16,
+    fontSize: 14,
   },
   chipLabel: {
     color: '#aaa',
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: 'bold',
-    letterSpacing: 1.5,
+    letterSpacing: 0.5,
   },
   chipLabelSelected: {
     color: 'white',
@@ -475,6 +518,65 @@ const styles = StyleSheet.create({
     color: 'white',
     fontSize: 18,
     fontWeight: 'bold',
-
+  },
+  unsavedOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 32,
+  },
+  unsavedSheet: {
+    backgroundColor: '#1e1e30',
+    borderRadius: 24,
+    padding: 28,
+    width: '100%',
+    gap: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.07)',
+  },
+  unsavedTitle: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: '700',
+    textAlign: 'center',
+    marginBottom: 2,
+  },
+  unsavedBody: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 14,
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 8,
+  },
+  unsavedBtnSave: {
+    backgroundColor: '#2e86de',
+    borderRadius: 16,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  unsavedBtnSaveText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  unsavedBtnDiscard: {
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderRadius: 16,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  unsavedBtnDiscardText: {
+    color: 'rgba(255,80,80,0.85)',
+    fontSize: 15,
+    fontWeight: '500',
+  },
+  unsavedBtnCancel: {
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  unsavedBtnCancelText: {
+    color: 'rgba(255,255,255,0.3)',
+    fontSize: 14,
   },
 });

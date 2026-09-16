@@ -16,15 +16,11 @@
             "CFBundleURLSchemes": [
               "pauseapp"
             ]
-          },
-          {
-            "CFBundleURLSchemes": [
-              "pauseapp"
-            ]
           }
         ],
         "ITSAppUsesNonExemptEncryption": false
       },
+      "deploymentTarget": "16.0",
       "bundleIdentifier": "com.pauseprojectmaja.Pauseapp"
     },
     "android": {
@@ -39,17 +35,6 @@
           ],
           "category": [
             "BROWSABLE",
-            "DEFAULT"
-          ]
-        },
-        {
-          "action": "NDEF_DISCOVERED",
-          "data": [
-            {
-              "scheme": "pauseapp"
-            }
-          ],
-          "category": [
             "DEFAULT"
           ]
         }
@@ -69,12 +54,16 @@
         "BLUETOOTH_SCAN",
         "BLUETOOTH_CONNECT",
         "BLUETOOTH_ADVERTISE",
+        "ACCESS_FINE_LOCATION",
         "android.permission.BLUETOOTH",
         "android.permission.BLUETOOTH_ADMIN",
         "android.permission.BLUETOOTH_CONNECT",
-        "android.permission.NFC"
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
       ],
-      "package": "com.pauseprojectmaja.Pauseapp"
+      "package": "com.pauseprojectmaja.Pauseapp",
+      "googleServicesFile": "./google-services.json"
     },
     "web": {
       "output": "static",
@@ -106,10 +95,20 @@
           "bluetoothAlwaysPermission": "Allow $(BUNDLE_ID) to connect to bluetooth devices"
         }
       ],
+      "expo-audio",
+      "expo-video",
       [
-        "react-native-nfc-manager",
+        "expo-sensors",
         {
-          "nfcPermission": "Pause Pod uses NFC to start pause sessions"
+          "motionPermission": "Pause Pod använder rörelsesensorn för att veta när telefonen ställs i och läggs ner i lådan."
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Pause Pod behöver kameran för att spela in videopepp.",
+          "microphonePermission": "Pause Pod behöver mikrofonen för att spela in videopepp.",
+          "recordAudioAndroid": true
         }
       ]
     ],

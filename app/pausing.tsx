@@ -2,74 +2,94 @@ import { FontAwesome } from '@expo/vector-icons';
 import { useKeepAwake } from 'expo-keep-awake';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
-import { Animated, AppState, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { useBLE } from '../context/BLEContext';
-import { Interruption, logPause } from './pauseLogger';
+import { Animated, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useSession } from '../context/SessionContext';
+import { useAuth } from '../contexts/AuthContext';
+import { supabase } from '../lib/supabase';
+import { PauseType } from '../lib/sessionMachine';
+import { clearSessionCheckpoint, findCategoryById, logPause, saveSessionCheckpoint } from './pauseLogger';
 
-const REGULATE_SECONDS = 12 * 60;
+const RESPITE_SECONDS = 30;
 
-const activeInstanceRef = { current: null as string | null };
+function generateLocalSeq(): string {
+  return `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
 
 export default function PausingScreen() {
   useKeepAwake();
-  const { mode, category } = useLocalSearchParams<{ mode: string; category: string }>();
-  const isRegulate = mode === 'regulate';
-  const myId = useRef(Math.random().toString(36).substr(2, 5));
+  const { user } = useAuth();
+  const { state, dispatch } = useSession();
+  const {
+    category,
+    sharedSessionId,
+    sharedWithName,
+    withPod,
+    pauseType,
+    targetSeconds,
+  } = useLocalSearchParams<{
+    category: string;
+    sharedSessionId: string;
+    withPod: string;
+    sharedWithName: string;
+    pauseType: string;
+    targetSeconds: string;
+  }>();
 
-  const [seconds, setSeconds] = useState(isRegulate ? REGULATE_SECONDS : 0);
-  const [done, setDone] = useState(false);
-  const [paused, setPaused] = useState(false);
-  const [showResumeModal, setShowResumeModal] = useState(false);
-  const [isLidOpen, setIsLidOpen] = useState(false);
-  const wentToBackground = useRef(false);
-  const interruptStartRef = useRef<number | null>(null);
-  const interruptTimestampRef = useRef<string | null>(null);
-  const interruptionsRef = useRef<Interruption[]>([]);
+  // Var vi i idle när skärmen monterades? Då är DET HÄR som äger start och
+  // slut (lådlöst flöde, eller ett delat-med-vän-flöde som aldrig gick via
+  // ritualen). Var vi redan 'active' (eller på väg dit via RESTORE) äger
+  // lådan sessionen — SessionContext har redan skrivit och ackat innan
+  // fasen blir 'ended', vi bara visar och navigerar vidare.
+  const isManualOriginRef = useRef(state.phase === 'idle');
+  const endedHandledRef = useRef(false);
+  const autoEndFiredRef = useRef(false);
+
+  const [, forceTick] = useState(0);
 
   const pulse1 = useRef(new Animated.Value(1)).current;
   const pulse2 = useRef(new Animated.Value(1)).current;
   const pulse3 = useRef(new Animated.Value(1)).current;
 
-  const { bleMessage, resetMessage, sendMessageToDevice } = useBLE();
-
+  // ── Starta manuellt om vi kom hit utan att ha gått via lådans ritual ──
   useEffect(() => {
-    activeInstanceRef.current = myId.current;
-    return () => {
-      if (activeInstanceRef.current === myId.current) {
-        activeInstanceRef.current = null;
-      }
-    };
+    if (!isManualOriginRef.current) return;
+    const isRegulate = pauseType === 'regulate';
+    dispatch({
+      type: 'SESSION_STARTED',
+      seq: generateLocalSeq(),
+      withPod: withPod === 'true',
+      pauseType: (isRegulate ? 'regulate' : 'session') as PauseType,
+      targetSeconds: isRegulate ? parseInt(targetSeconds ?? '0', 10) : undefined,
+      category: category || undefined,
+      sharedSessionId: sharedSessionId || undefined,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ── is_pausing-flaggan, oavsett flöde ──
   useEffect(() => {
-    if (activeInstanceRef.current !== myId.current) {
-      return;
-    }
-    if (!bleMessage) return;
+    if (!user?.id) return;
+    supabase.from('profiles').update({ is_pausing: true }).eq('id', user.id);
+    return () => {
+      supabase.from('profiles').update({ is_pausing: false }).eq('id', user.id);
+    };
+  }, [user?.id]);
 
-    if (bleMessage === 'LID_OPEN') {
-      if (done) return;
-      setIsLidOpen(true);
-      interruptStartRef.current = Date.now();
-      interruptTimestampRef.current = new Date().toISOString();
-      setPaused(true);
-    }
-    if (bleMessage === 'LID_CLOSED') {
-      if (interruptStartRef.current !== null) {
-        interruptionsRef.current.push({
-          timestamp: interruptTimestampRef.current!,
-          durationMs: Date.now() - interruptStartRef.current,
-          resumedOrEnded: 'resumed',
-        });
-        interruptStartRef.current = null;
-        interruptTimestampRef.current = null;
-      }
-      setIsLidOpen(false);
-      setPaused(false);
-    }
-    resetMessage();
-  }, [bleMessage]);
+  // ── Krasch-checkpoint — bara för det manuella flödet. Lådans egen
+  // state-synk vid återanslutning (se _layout.tsx) täcker box-flödet. ──
+  useEffect(() => {
+    if (!isManualOriginRef.current || !user?.id || state.phase !== 'active') return;
+    saveSessionCheckpoint({
+      startedAt: new Date(state.startedAt ?? Date.now()).toISOString(),
+      userId: user.id,
+      category: state.category || undefined,
+      pauseType: state.pauseType,
+      targetSeconds: state.pauseType === 'regulate' ? state.targetSeconds : undefined,
+      sharedSessionId: state.sharedSessionId || undefined,
+    });
+  }, [isManualOriginRef.current, user?.id, state.phase, state.startedAt]);
 
+  // ── Pulsanimation ──
   useEffect(() => {
     const createPulse = (anim: Animated.Value, delay: number) => {
       Animated.loop(
@@ -85,56 +105,100 @@ export default function PausingScreen() {
     createPulse(pulse3, 1000);
   }, []);
 
-  // Pausa timern och visa modal om appen lämnas (t.ex. vid samtal)
+  // ── Sekundvisning — tickar bara om för att trigga omrendering; faktiskt
+  // elapsed räknas ut vid varje render från state, se computeElapsedMs. ──
   useEffect(() => {
-    const sub = AppState.addEventListener('change', (nextState) => {
-      if (nextState === 'background' || nextState === 'inactive') {
-        wentToBackground.current = true;
-        interruptStartRef.current = Date.now();
-        interruptTimestampRef.current = new Date().toISOString();
-        setPaused(true);
-      } else if (nextState === 'active' && wentToBackground.current) {
-        setShowResumeModal(true);
-      }
-    });
-    return () => sub.remove();
-  }, []);
-
-  useEffect(() => {
-    if (done || paused) return;
-    const interval = setInterval(() => {
-      setSeconds(prev => {
-        if (isRegulate) {
-          if (prev <= 1) { setDone(true); clearInterval(interval); return 0; }
-          return prev - 1;
-        } else {
-          return prev + 1;
-        }
-      });
-    }, 1000);
+    const interval = setInterval(() => forceTick(t => t + 1), 1000);
     return () => clearInterval(interval);
-  }, [done, paused]);
-
-  useEffect(() => {
-    const modeStr = isRegulate ? 'REGULATE' : 'SESSION';
-    const direction = isRegulate ? 'DOWN' : 'UP';
-    const startSeconds = isRegulate ? REGULATE_SECONDS : 0;
-    sendMessageToDevice(`PAUSE_START:${modeStr}:${direction}:${startSeconds}`);
   }, []);
 
-  useEffect(() => {
-    if (paused) {
-      sendMessageToDevice('PAUSE_HOLD');
-    } else {
-      sendMessageToDevice('PAUSE_RESUME');
-    }
-  }, [paused]);
+  const computeElapsedMs = (): number => {
+    if (!state.startedAt) return 0;
+    const now = state.phase === 'respite' && state.respiteStartedAt ? state.respiteStartedAt : Date.now();
+    return Math.max(0, now - state.startedAt - state.pausedMs + state.elapsedBaselineMs);
+  };
 
+  const elapsedMs = computeElapsedMs();
+  const isRegulate = state.pauseType === 'regulate' && !!state.targetSeconds;
+  const seconds = isRegulate
+    ? Math.max(0, (state.targetSeconds ?? 0) - Math.floor(elapsedMs / 1000))
+    : Math.floor(elapsedMs / 1000);
+
+  const respiteSecondsLeft = state.respiteStartedAt
+    ? Math.max(0, RESPITE_SECONDS - Math.floor((Date.now() - state.respiteStartedAt) / 1000))
+    : RESPITE_SECONDS;
+
+  // ── Regulate-nedräkning (bara lådlöst) tar slut av sig själv ──
   useEffect(() => {
-    if (done) {
-      sendMessageToDevice('PAUSE_DONE');
-    }
-  }, [done]);
+    if (!isManualOriginRef.current || !isRegulate || autoEndFiredRef.current) return;
+    if (seconds > 0) return;
+    autoEndFiredRef.current = true;
+    dispatch({
+      type: 'SESSION_ENDED',
+      seq: state.seq ?? '',
+      durationMs: (state.targetSeconds ?? 0) * 1000,
+      completed: true,
+    });
+  }, [seconds, isRegulate]);
+
+  // ── Sessionen är slut. Manuellt ursprung sparar till Supabase precis som
+  // innan; box-ursprung är redan sparat (SessionContext skrev till outboxen
+  // och ackade innan den dispatchade SESSION_ENDED). ──
+  useEffect(() => {
+    if (state.phase !== 'ended' || !state.lastEnded || endedHandledRef.current) return;
+    endedHandledRef.current = true;
+
+    (async () => {
+      const durationSeconds = Math.round(state.lastEnded!.durationMs / 1000);
+
+      if (isManualOriginRef.current) {
+        const now = new Date().toISOString();
+        if (state.sharedSessionId && user?.id) {
+          await supabase
+            .from('pause_sessions')
+            .update({ ended_at: now, duration_seconds: durationSeconds })
+            .eq('shared_session_id', state.sharedSessionId)
+            .eq('user_id', user.id);
+        } else if (user?.id) {
+          let intentionLabel: string | null = null;
+          if (state.category) {
+            const cat = await findCategoryById(state.category);
+            intentionLabel = cat?.label ?? null;
+          }
+          const { error } = await supabase.from('pause_sessions').insert({
+            user_id: user.id,
+            started_at: new Date(Date.now() - durationSeconds * 1000).toISOString(),
+            ended_at: now,
+            duration_seconds: durationSeconds,
+            intention: intentionLabel,
+            is_shared: false,
+            with_pod: state.withPod,
+            completed: state.lastEnded!.completed,
+          });
+          if (error) console.log('pause_sessions insert error:', JSON.stringify(error));
+        }
+        await logPause(durationSeconds, 'session', state.category || undefined);
+        await clearSessionCheckpoint();
+      }
+
+      const finalCategory = state.category ?? '';
+      const finalSharedWithName = sharedWithName ?? '';
+      const finalSharedSessionId = state.sharedSessionId ?? '';
+
+      dispatch({ type: 'RESET' });
+
+      router.replace({
+        pathname: '/pausesummary',
+        params: {
+          duration: String(durationSeconds),
+          mode: 'session',
+          category: finalCategory,
+          sharedWithName: finalSharedWithName,
+          sharedSessionId: finalSharedSessionId,
+        },
+      });
+    })();
+  }, [state.phase]);
 
   const formatTime = (secs: number) => {
     const m = Math.floor(secs / 60).toString().padStart(2, '0');
@@ -142,62 +206,10 @@ export default function PausingScreen() {
     return `${m}:${s}`;
   };
 
-  const handleResume = () => {
-    if (interruptStartRef.current !== null) {
-      interruptionsRef.current.push({
-        timestamp: interruptTimestampRef.current!,
-        durationMs: Date.now() - interruptStartRef.current,
-        resumedOrEnded: 'resumed',
-      });
-      interruptStartRef.current = null;
-      interruptTimestampRef.current = null;
-    }
-    wentToBackground.current = false;
-    setShowResumeModal(false);
-    setPaused(false);
-  };
-
-  const handleDone = async () => {
-    sendMessageToDevice('PAUSE_DONE');
-    if (interruptStartRef.current !== null) {
-      interruptionsRef.current.push({
-        timestamp: interruptTimestampRef.current!,
-        durationMs: Date.now() - interruptStartRef.current,
-        resumedOrEnded: 'ended',
-      });
-      interruptStartRef.current = null;
-      interruptTimestampRef.current = null;
-    }
-    const actualDuration = isRegulate ? REGULATE_SECONDS - seconds : seconds;
-    const interruptions = interruptionsRef.current.length > 0 ? interruptionsRef.current : undefined;
-    await logPause(actualDuration, isRegulate ? 'regulate' : 'session', category || undefined, interruptions);
-    router.replace({
-      pathname: '/pausesummary',
-      params: {
-        duration: String(actualDuration),
-        mode: isRegulate ? 'regulate' : 'session',
-        category: category ?? '',
-      },
-    });
-  };
+  const titleText = isRegulate ? 'Regulate pågår...' : 'Session pågår...';
 
   return (
     <View style={styles.container}>
-      <Modal transparent animationType="fade" visible={showResumeModal}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalBox}>
-            <Text style={styles.modalTitle}>Pausen avbröts</Text>
-            <Text style={styles.modalSubtitle}>Du lämnade appen. Vill du återuppta pausen?</Text>
-            <TouchableOpacity style={styles.modalPrimary} onPress={handleResume}>
-              <Text style={styles.modalPrimaryText}>Återuppta paus</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.modalSecondary} onPress={handleDone}>
-              <Text style={styles.modalSecondaryText}>Avsluta</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
-
       <View style={styles.pulseContainer}>
         <Animated.View style={[styles.ring, styles.ring3, { transform: [{ scale: pulse3 }] }]} />
         <Animated.View style={[styles.ring, styles.ring2, { transform: [{ scale: pulse2 }] }]} />
@@ -207,40 +219,41 @@ export default function PausingScreen() {
         </View>
       </View>
 
-      {done ? (
-        <>
-          <Text style={styles.title}>Bra jobbat!</Text>
-          <Text style={styles.subtitle}>Du tog en paus på 12 minuter</Text>
-        </>
-      ) : (
-        <>
-          <Text style={styles.title}>{isRegulate ? 'Pausar...' : 'Session pågår...'}</Text>
-          <Text style={styles.subtitle}>Lägg telefonen i lådan</Text>
-          <Text style={styles.timer}>{formatTime(seconds)}</Text>
-        </>
+      <Text style={styles.title}>{titleText}</Text>
+      <Text style={styles.subtitle}> </Text>
+
+      <View style={styles.timerWrap}>
+        <Text style={styles.timer}>{formatTime(seconds)}</Text>
+        {isRegulate && (
+          <Text style={styles.timerLabel}>kvar</Text>
+        )}
+      </View>
+
+      {/* Lådan äger avslutet i box-flödet — ingen "Klar"-knapp där. */}
+      {isManualOriginRef.current && (
+        <TouchableOpacity
+          style={styles.doneButton}
+          onPress={() => {
+            if (autoEndFiredRef.current) return;
+            autoEndFiredRef.current = true;
+            dispatch({
+              type: 'SESSION_ENDED',
+              seq: state.seq ?? '',
+              durationMs: elapsedMs,
+              completed: true,
+            });
+          }}
+        >
+          <Text style={styles.doneText}>Klar</Text>
+        </TouchableOpacity>
       )}
 
-      <TouchableOpacity style={styles.doneButton} onPress={handleDone}>
-        <Text style={styles.doneText}>{done ? 'Stäng' : 'Klar'}</Text>
-      </TouchableOpacity>
-
-      {isLidOpen && !done && (
+      {state.phase === 'respite' && (
         <View style={styles.lidOpenOverlay}>
-          <Text style={styles.lidOpenTitle}>Paus stoppad</Text>
+          <Text style={styles.lidOpenTitle}>{respiteSecondsLeft}</Text>
           <Text style={styles.lidOpenSubtitle}>
-            Lägg på locket för att{'\n'}återuppta pausen
+            Stäng locket för{'\n'}att fortsätta
           </Text>
-          {!isRegulate && (
-            <TouchableOpacity
-              style={styles.donePauseButton}
-              onPress={() => {
-                sendMessageToDevice('PAUSE_DONE');
-                handleDone();
-              }}
-            >
-              <Text style={styles.donePauseText}>PAUS KLAR</Text>
-            </TouchableOpacity>
-          )}
         </View>
       )}
     </View>
@@ -280,7 +293,19 @@ const styles = StyleSheet.create({
   },
   title: { fontSize: 32, fontWeight: 'bold', color: 'white' },
   subtitle: { fontSize: 18, color: '#aaa', textAlign: 'center', paddingHorizontal: 40 },
+  timerWrap: {
+    alignItems: 'center',
+    gap: 4,
+  },
   timer: { fontSize: 56, fontWeight: 'bold', color: 'white', letterSpacing: 4 },
+  timerLabel: {
+    fontSize: 13,
+    color: '#2e86de',
+    fontWeight: '600',
+    letterSpacing: 3,
+    textTransform: 'uppercase',
+    opacity: 0.8,
+  },
   doneButton: {
     marginTop: 20,
     backgroundColor: '#2e86de',
@@ -289,34 +314,6 @@ const styles = StyleSheet.create({
     borderRadius: 32,
   },
   doneText: { color: 'white', fontSize: 20, fontWeight: 'bold' },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  modalBox: {
-    backgroundColor: '#16213e',
-    borderRadius: 20,
-    padding: 32,
-    width: '80%',
-    alignItems: 'center',
-    gap: 16,
-    borderWidth: 1,
-    borderColor: '#2e86de33',
-  },
-  modalTitle: { fontSize: 22, fontWeight: 'bold', color: 'white' },
-  modalSubtitle: { fontSize: 15, color: '#aaa', textAlign: 'center' },
-  modalPrimary: {
-    backgroundColor: '#2e86de',
-    paddingVertical: 14,
-    paddingHorizontal: 40,
-    borderRadius: 28,
-    marginTop: 8,
-  },
-  modalPrimaryText: { color: 'white', fontSize: 16, fontWeight: 'bold' },
-  modalSecondary: { paddingVertical: 10 },
-  modalSecondaryText: { color: '#666', fontSize: 14 },
   lidOpenOverlay: {
     position: 'absolute',
     top: 0,
@@ -340,23 +337,5 @@ const styles = StyleSheet.create({
     color: '#888',
     textAlign: 'center',
     lineHeight: 24,
-  },
-  donePauseButton: {
-    marginTop: 32,
-    backgroundColor: '#2e86de',
-    paddingVertical: 18,
-    paddingHorizontal: 50,
-    borderRadius: 32,
-    shadowColor: '#2e86de',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.4,
-    shadowRadius: 16,
-    elevation: 12,
-  },
-  donePauseText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: '700',
-    letterSpacing: 3,
   },
 });

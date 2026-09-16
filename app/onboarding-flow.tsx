@@ -1,20 +1,24 @@
 import { FontAwesome, FontAwesome5, Ionicons } from '@expo/vector-icons';
+import { decode } from 'base64-arraybuffer';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
-import * as Notifications from 'expo-notifications';
 import { router } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
+import { useAuth } from '../contexts/AuthContext';
+import { supabase } from '../lib/supabase';
 import {
-  Animated, Dimensions, Image, ScrollView, StyleSheet,
+  Animated, Dimensions, Image, Keyboard, KeyboardAvoidingView, Platform, ScrollView, StyleSheet,
   Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
+import DismissKeyboardView from './components/DismissKeyboardView';
 import RecordScreen from './components/RecordScreen';
+import { BLOCKS_STORAGE_PATH, TIME_BLOCKS as _TIME_BLOCKS, scheduleBlockNotifications } from '../lib/notifications';
 import { DEFAULT_CATEGORIES, logNotificationSettingsChange, saveSelectedCategories } from './pauseLogger';
 import { getProfile, saveProfile } from './userProfile';
 
 const { width } = Dimensions.get('window');
 const FILES_PATH = FileSystem.documentDirectory + 'selectedFiles.json';
-const STORAGE_PATH = FileSystem.documentDirectory + 'selectedBlocks.json';
+const STORAGE_PATH = (FileSystem.documentDirectory ?? '') + BLOCKS_STORAGE_PATH;
 
 const TIME_BLOCKS = [
   { id: 'morning',       label: '🌅 Morgon',      time: '07:00-09:00', hour: 7  },
@@ -94,7 +98,8 @@ function Step2({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
   };
 
   return (
-    <View style={styles.stepCentered}>
+    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+      <DismissKeyboardView style={styles.stepCentered}>
       <Animated.View style={{ opacity: fadeAnim, transform: [{ scale: scaleAnim }], alignItems: 'center', width: '100%' }}>
         <Text style={styles.stepTitle}>Låt oss börja med{'\n'}det viktigaste</Text>
         <Text style={styles.stepSubtitle}>
@@ -117,6 +122,9 @@ function Step2({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
           value={name}
           onChangeText={setName}
           autoCapitalize="words"
+          returnKeyType="done"
+          onSubmitEditing={Keyboard.dismiss}
+          blurOnSubmit
         />
       </Animated.View>
       <View style={styles.buttonGroup}>
@@ -127,7 +135,8 @@ function Step2({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
           <Text style={styles.backButtonText}>← Tillbaka</Text>
         </TouchableOpacity>
       </View>
-    </View>
+      </DismissKeyboardView>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -245,6 +254,65 @@ function Step3({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
   );
 }
 
+// ─── Step 3b — Text till sig själv ───────────────────────────────────────────
+function StepSelfText({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
+  const { user } = useAuth();
+  const [text, setText] = useState('');
+  const [saving, setSaving] = useState(false);
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }).start();
+  }, []);
+
+  const handleSave = async () => {
+    if (!text.trim() || !user?.id) { onNext(); return; }
+    setSaving(true);
+    await supabase.from('user_self_texts').insert({ user_id: user.id, text_content: text.trim() });
+    setSaving(false);
+    onNext();
+  };
+
+  return (
+    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+      <DismissKeyboardView style={styles.stepCentered}>
+      <Animated.View style={{ opacity: fadeAnim, alignItems: 'center', width: '100%' }}>
+        <Text style={styles.stepTitle}>En hälsning till{'\n'}dig själv</Text>
+        <Text style={styles.stepSubtitle}>
+          Skriv något uppmuntrande. Det kan dyka upp som en liten påminnelse när du behöver det.
+        </Text>
+        <TextInput
+          style={[styles.nameInput, selfTextStyles.input]}
+          placeholder="Hej, du klarar det fint..."
+          placeholderTextColor="#444"
+          value={text}
+          onChangeText={t => t.length <= 280 && setText(t)}
+          multiline
+          textAlignVertical="top"
+          textAlign="left"
+        />
+        <Text style={selfTextStyles.charCount}>{text.length}/280</Text>
+      </Animated.View>
+      <View style={styles.buttonGroup}>
+        <TouchableOpacity
+          style={[styles.nextButton, (!text.trim() || saving) && styles.nextButtonDisabled]}
+          onPress={handleSave}
+          disabled={saving}
+        >
+          <Text style={styles.nextText}>{saving ? 'Sparar…' : 'Spara →'}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity onPress={onNext} style={styles.skipButton}>
+          <Text style={styles.skipButtonText}>Gör det senare</Text>
+        </TouchableOpacity>
+        <TouchableOpacity onPress={onBack} style={styles.backButton}>
+          <Text style={styles.backButtonText}>← Tillbaka</Text>
+        </TouchableOpacity>
+      </View>
+      </DismissKeyboardView>
+    </KeyboardAvoidingView>
+  );
+}
+
 // ─── Step 4 — Välj pausaktiviteter ───────────────────────────────────────────
 function Step4({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
   const [selected, setSelected] = useState<string[]>([]);
@@ -303,7 +371,7 @@ function Step4({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
 }
 
 // ─── Step 5 — Tidsblock ───────────────────────────────────────────────────────
-function Step5({ onDone, onBack }: { onDone: () => void; onBack: () => void }) {
+function Step5({ onDone, onBack }: { onDone: () => Promise<void>; onBack: () => void }) {
   const [selected, setSelected] = useState<string[]>([]);
   const fadeAnim = useRef(new Animated.Value(0)).current;
 
@@ -325,44 +393,15 @@ function Step5({ onDone, onBack }: { onDone: () => void; onBack: () => void }) {
     } catch {}
 
     await FileSystem.writeAsStringAsync(STORAGE_PATH, JSON.stringify(selected));
-    await Notifications.cancelAllScheduledNotificationsAsync();
+    await scheduleBlockNotifications(callerName, selected);
 
-    const selectedBlocks = TIME_BLOCKS.filter(b => selected.includes(b.id));
-    for (let day = 0; day < 14; day++) {
-      for (const block of selectedBlocks) {
-        const randomMinute = Math.floor(Math.random() * 60);
-        const date = new Date();
-        date.setDate(date.getDate() + day);
-        date.setHours(block.hour, randomMinute, 0, 0);
-        if (date > new Date()) {
-          await Notifications.scheduleNotificationAsync({
-            content: {
-              title: callerName,
-              body: 'Inkommande samtal',
-              sound: 'ringtone.wav',
-              data: { screen: 'call' },
-            },
-            trigger: {
-              type: Notifications.SchedulableTriggerInputTypes.DATE,
-              date,
-              channelId: 'incoming-call',
-            },
-          });
-        }
-      }
-    }
-
+    const selectedBlocks = _TIME_BLOCKS.filter(b => selected.includes(b.id));
     await logNotificationSettingsChange({
       timesPerDay: selectedBlocks.length,
       timeSlots: selectedBlocks.map(b => ({ id: b.id, label: b.label, time: b.time })),
     });
 
-    await FileSystem.writeAsStringAsync(
-      FileSystem.documentDirectory + 'onboardingDone.json',
-      JSON.stringify({ done: true })
-    );
-
-    onDone();
+    await onDone();
   };
 
   return (
@@ -408,9 +447,10 @@ function Step5({ onDone, onBack }: { onDone: () => void; onBack: () => void }) {
 
 // ─── Main flow ────────────────────────────────────────────────────────────────
 export default function OnboardingFlow() {
+  const { completeOnboarding, user } = useAuth();
   const [step, setStep] = useState(0);
   const slideAnim = useRef(new Animated.Value(0)).current;
-  const totalSteps = 5;
+  const totalSteps = 6;
 
   const goToNext = () => {
     Animated.sequence([
@@ -436,8 +476,55 @@ export default function OnboardingFlow() {
     <Step1 onNext={goToNext} />,
     <Step2 onNext={goToNext} onBack={goBack} />,
     <Step3 onNext={goToNext} onBack={goBack} />,
+    <StepSelfText onNext={goToNext} onBack={goBack} />,
     <Step4 onNext={goToNext} onBack={goBack} />,
-    <Step5 onDone={() => router.replace('/onboarding-complete')} onBack={goBack} />,
+    <Step5 onDone={async () => {
+      if (!user?.id) return;
+
+      const savedProfile = await getProfile();
+      const username =
+        savedProfile.name ||
+        (user.user_metadata?.username ??
+        user.user_metadata?.name ??
+        user.email?.split('@')[0] ??
+        'user');
+
+      let avatarUrl: string | null = null;
+      if (savedProfile.photoUri) {
+        if (savedProfile.photoUri.startsWith('https://')) {
+          avatarUrl = savedProfile.photoUri;
+        } else {
+          try {
+            const base64 = await FileSystem.readAsStringAsync(savedProfile.photoUri, {
+              encoding: FileSystem.EncodingType.Base64,
+            });
+            const path = `${user.id}/avatar.jpg`;
+            const { error: uploadError } = await supabase.storage
+              .from('avatars')
+              .upload(path, decode(base64), { contentType: 'image/jpeg', upsert: true });
+            if (!uploadError) {
+              const { data: urlData } = supabase.storage.from('avatars').getPublicUrl(path);
+              avatarUrl = urlData.publicUrl + '?t=' + Date.now();
+            }
+          } catch {}
+        }
+      }
+
+      const { data, error } = await supabase
+        .from('profiles')
+        .update({ onboarding_completed: true, username, avatar_url: avatarUrl })
+        .eq('id', user.id)
+        .select('id');
+
+      if (!error && (!data || data.length === 0)) {
+        await supabase
+          .from('profiles')
+          .insert({ id: user.id, username, avatar_url: avatarUrl, onboarding_completed: true, show_stats: false });
+      }
+
+      await completeOnboarding();
+      router.replace('/onboarding-complete' as never);
+    }} onBack={goBack} />,
   ];
 
   return (
@@ -638,7 +725,8 @@ const styles = StyleSheet.create({
   backButton: {
     marginTop: 8,
     marginBottom: 10,
-    padding: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
   },
   backButtonText: {
     color: '#777',
@@ -660,6 +748,23 @@ const styles = StyleSheet.create({
     color: '#444',
     fontSize: 13,
     textDecorationLine: 'underline',
+  },
+});
+
+// ─── StepSelfText styles ──────────────────────────────────────────────────────
+const selfTextStyles = StyleSheet.create({
+  input: {
+    height: 110,
+    textAlignVertical: 'top',
+    textAlign: 'left',
+    marginTop: 28,
+    paddingTop: 14,
+  },
+  charCount: {
+    color: '#555',
+    fontSize: 12,
+    alignSelf: 'flex-end',
+    marginTop: 6,
   },
 });
 

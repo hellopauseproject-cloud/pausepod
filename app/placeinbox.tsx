@@ -1,160 +1,183 @@
+import * as Haptics from 'expo-haptics';
+import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useVideoPlayer, VideoView } from 'expo-video';
+import { DeviceMotion } from 'expo-sensors';
 import { useEffect, useRef, useState } from 'react';
-import { Animated, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import NfcManager from 'react-native-nfc-manager';
+import { Animated, StyleSheet, Text, View } from 'react-native';
 import { useBLE } from '../context/BLEContext';
-import { useNfc } from '../hooks/useNfc';
+import { useSession } from '../context/SessionContext';
 import { setInboxActive } from '../lib/inboxGuard';
+import { dimScreen, restoreScreenBrightness } from '../lib/screenBrightnessGuard';
 
-type Phase = 'touch' | 'nfc2' | 'lid';
+const KEEP_AWAKE_TAG = 'placeinbox';
+const RING_SIZE = 100;
 
-const activeInstanceRef = { current: null as string | null };
+// Accelerometer-driven feedback — ren upplevelse. Triggar den aldrig (telefonen
+// vilar i en vinkel vi inte fångar) startar pausen ändå normalt via lådans
+// egna phone_down/lid_closed — det här styr bara text och skärmljus.
+const FLAT_THRESHOLD_RAD = 0.6;
+const MOTION_INTERVAL_MS = 200;
+const REQUIRED_CONSECUTIVE_READINGS = 2;
+const UNDO_WINDOW_MS = 5000;
 
 export default function PlaceInBoxScreen() {
-  const { mode, category } = useLocalSearchParams<{ mode: string; category: string }>();
-  const myId = useRef(Math.random().toString(36).substr(2, 5));
-  const phaseRef = useRef<Phase>('touch');
-  const [phase, setPhaseState] = useState<Phase>('touch');
-  const setPhase = (newPhase: Phase) => {
-    phaseRef.current = newPhase;
-    setPhaseState(newPhase);
-  };
+  const { category } = useLocalSearchParams<{ category: string }>();
+  const { state, dispatch } = useSession();
+  const { sendPhoneDown } = useBLE();
+  const { phase, touches } = state;
 
-  // Animations
+  // Checkin-fasens feedback
+  const ringFill = useRef(new Animated.Value(0)).current;
+  const bothDown = touches.left && touches.right;
+  const prevTouchesRef = useRef(touches);
+  const prevPhaseRef = useRef(phase);
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
+  // sendPhoneDown byter identitet varje render av BLEProvider (inte
+  // memoiserad) — en ref håller DeviceMotion-effekten nedan äkta mount-once.
+  const sendPhoneDownRef = useRef(sendPhoneDown);
+  sendPhoneDownRef.current = sendPhoneDown;
+
+  // Animationer
   const breathe = useRef(new Animated.Value(1)).current;
   const pulse = useRef(new Animated.Value(1)).current;
   const pulseOpacity = useRef(new Animated.Value(0.3)).current;
 
-  // BLE
-  const { bleMessage, resetMessage, sendMessageToDevice } = useBLE();
+  // ── Lutningsdetektion (bara relevant i checked_in) ──
+  const [phoneFlat, setPhoneFlat] = useState(false);
+  const rawStreakRef = useRef<{ value: 'upright' | 'flat'; count: number }>({ value: 'upright', count: 0 });
+  const confirmedFlatRef = useRef(false);
+  const flatSinceRef = useRef<number | null>(null);
+  const hasSentPhoneDownRef = useRef(false);
 
-  // Touch-hint
-  const hintOpacity = useRef(new Animated.Value(1)).current;
-  const touchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const fadeHint = () =>
-    Animated.timing(hintOpacity, { toValue: 0, duration: 500, useNativeDriver: true }).start();
-
-  // NFC
-  const nfcHandledRef = useRef(false);
-  const nfcActiveRef = useRef(false);
-
-  // Återställ nfcHandled vid varje fasbyte
+  // ── Gå in i incheckningsläget. Bara om vi kommer hit från idle — en
+  // RESTORE efter återanslutning kan redan ha satt oss i checked_in/awaiting_lid. ──
   useEffect(() => {
-    nfcHandledRef.current = false;
-  }, [phase]);
-
-  // Meddela ESP32 om touch-fasens start och slut
-  useEffect(() => {
-    if (phase === 'touch') {
-      sendMessageToDevice('TOUCH_PHASE_START');
+    if (state.phase === 'idle') {
+      dispatch({ type: 'ENTER_CHECKIN', category: category || undefined });
     }
-    if (phase === 'nfc2' || phase === 'lid') {
-      sendMessageToDevice('TOUCH_PHASE_END');
-    }
-  }, [phase]);
-
-  const { scan } = useNfc(() => {
-    if (nfcHandledRef.current) return;
-    nfcHandledRef.current = true;
-    if (phaseRef.current === 'nfc2') {
-      sendMessageToDevice('NFC_SCANNED');
-      setPhase('lid');
-    }
-  });
-
-  // NFC-loop — körs endast i nfc2, stoppas vid fasbyte
-  useEffect(() => {
-    if (phase !== 'nfc2') {
-      nfcActiveRef.current = false;
-      return;
-    }
-    nfcActiveRef.current = true;
-
-    const keepScanning = async () => {
-      while (nfcActiveRef.current && phaseRef.current === 'nfc2') {
-        try {
-          await scan();
-        } catch (e) {
-          // ignorera tyst
-        }
-        if (nfcActiveRef.current) {
-          await new Promise(r => setTimeout(r, 500));
-        }
-      }
-    };
-
-    keepScanning();
-
-    return () => {
-      nfcActiveRef.current = false;
-      NfcManager.cancelTechnologyRequest().catch(() => {});
-    };
-  }, [phase]);
-
-  // Registrera aktiv instans
-  useEffect(() => {
-    activeInstanceRef.current = myId.current;
-    return () => {
-      if (activeInstanceRef.current === myId.current) {
-        activeInstanceRef.current = null;
-      }
-    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // BLE — hantera meddelanden enbart i rätt fas
+  // ── Flagga aktiv medan vi är på den här skärmen (gate:ar t.ex. fejksamtal) ──
   useEffect(() => {
-    if (activeInstanceRef.current !== myId.current) return;
-    if (!bleMessage) return;
-    if (phaseRef.current === 'touch') {
-      if (bleMessage === 'TOUCH_START') { player.play(); fadeHint(); }
-      if (bleMessage === 'TOUCH_END') player.pause();
-    }
-    if (phaseRef.current === 'lid') {
-      if (bleMessage === 'LID_CLOSED') handleStartPause();
-    }
-    resetMessage();
-  }, [bleMessage]);
-
-  // Video
-  const videoRef = useRef(null);
-  const player = useVideoPlayer(require('../assets/images/landscape.mp4'), p => {
-    p.loop = false;
-  });
-
-  // Sätt flaggan aktiv medan vi är på den här skärmen
-  useEffect(() => {
-    setInboxActive(true, { mode: String(mode), category: String(category ?? '') });
+    setInboxActive(true, { mode: 'session', category: String(category ?? '') });
     return () => setInboxActive(false);
   }, []);
 
-  // Andningsanimation (alltid aktiv)
+  // ── Skärmen får inte slockna medan tummarna ska hållas ──
   useEffect(() => {
-    Animated.loop(
+    if (phase === 'checking_in' || phase === 'checked_in') {
+      activateKeepAwakeAsync(KEEP_AWAKE_TAG).catch(() => {});
+    } else {
+      deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {});
+    }
+  }, [phase]);
+  useEffect(() => () => { deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {}); }, []);
+
+  // ── Skärmljus städas alltid upp när den här skärmen lämnas, oavsett anledning. ──
+  useEffect(() => () => { restoreScreenBrightness(); }, []);
+
+  // ── Andningsanimation (alltid aktiv) ──
+  useEffect(() => {
+    const anim = Animated.loop(
       Animated.sequence([
         Animated.timing(breathe, { toValue: 1.15, duration: 3000, useNativeDriver: true }),
         Animated.timing(breathe, { toValue: 1, duration: 3000, useNativeDriver: true }),
       ])
-    ).start();
+    );
+    anim.start();
+    return () => anim.stop();
   }, []);
 
-  // Touch-fas: säkerställ pausat läge + lyssna på videoklipp slut → nfc2
+  // ── Ringfyllning: kosmetisk lokal 1,5s-timer medan båda tummarna hålls.
+  // Släpps en tumme innan checkin_complete kommit från lådan, backar ringen
+  // mjukt (inte ett reset) — och fasen ligger kvar i checking_in tills
+  // lådan själv säger klart. ──
   useEffect(() => {
-    if (phase !== 'touch') return;
-    player.pause();
-    const sub = player.addListener('playToEnd', () => {
-      setPhase('nfc2');
-    });
-    return () => {
-      sub.remove();
-      if (touchTimerRef.current) clearTimeout(touchTimerRef.current);
-    };
+    if (phase !== 'checking_in') return;
+    if (bothDown) {
+      Animated.timing(ringFill, {
+        toValue: 1,
+        duration: 1500,
+        useNativeDriver: false,
+      }).start();
+    } else {
+      Animated.timing(ringFill, {
+        toValue: 0,
+        duration: 400,
+        useNativeDriver: false,
+      }).start();
+    }
+  }, [bothDown, phase]);
+
+  // ── Haptik vid tumkontakt och vid klar incheckning; navigera vidare när pausen väl startat ──
+  useEffect(() => {
+    if (touches.left && !prevTouchesRef.current.left) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    if (touches.right && !prevTouchesRef.current.right) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    prevTouchesRef.current = touches;
+  }, [touches.left, touches.right]);
+
+  useEffect(() => {
+    if (prevPhaseRef.current === 'checking_in' && phase === 'checked_in') {
+      Animated.timing(ringFill, { toValue: 1, duration: 150, useNativeDriver: false }).start();
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    }
+    if (phase === 'active') {
+      router.replace({ pathname: '/pausing', params: { mode: 'session', withPod: 'true' } } as never);
+    }
+    prevPhaseRef.current = phase;
   }, [phase]);
 
-  // Lid-fas: pulsanimation
+  // ── Lutningsdetektion: prenumereras en gång vid mount, tas bort vid unmount.
+  // Ingen omprenumeration vid fasbyten — callbacken själv ignorerar allt
+  // utanför checked_in. ──
   useEffect(() => {
-    if (phase !== 'lid') return;
-    Animated.loop(
+    DeviceMotion.setUpdateInterval(MOTION_INTERVAL_MS);
+    const sub = DeviceMotion.addListener(({ rotation }) => {
+      if (phaseRef.current !== 'checked_in' || !rotation) return;
+
+      const raw: 'upright' | 'flat' = Math.abs(rotation.beta) < FLAT_THRESHOLD_RAD ? 'flat' : 'upright';
+      if (rawStreakRef.current.value === raw) {
+        rawStreakRef.current.count += 1;
+      } else {
+        rawStreakRef.current = { value: raw, count: 1 };
+      }
+      if (rawStreakRef.current.count < REQUIRED_CONSECUTIVE_READINGS) return;
+
+      const confirmedFlat = raw === 'flat';
+      if (confirmedFlat === confirmedFlatRef.current) return;
+
+      if (confirmedFlat) {
+        confirmedFlatRef.current = true;
+        flatSinceRef.current = Date.now();
+        setPhoneFlat(true);
+        dimScreen();
+        if (!hasSentPhoneDownRef.current) {
+          hasSentPhoneDownRef.current = true;
+          sendPhoneDownRef.current().catch(() => {});
+        }
+      } else {
+        const elapsed = flatSinceRef.current ? Date.now() - flatSinceRef.current : Infinity;
+        if (elapsed < UNDO_WINDOW_MS) {
+          // Justering, inte ett ångrande — låt allt vara som det är.
+          return;
+        }
+        confirmedFlatRef.current = false;
+        flatSinceRef.current = null;
+        hasSentPhoneDownRef.current = false;
+        setPhoneFlat(false);
+        restoreScreenBrightness();
+      }
+    });
+
+    return () => sub.remove();
+  }, []);
+
+  // ── Pulsanimation medan vi väntar på att locket stängs ──
+  useEffect(() => {
+    if (phase !== 'awaiting_lid') return;
+    const anim = Animated.loop(
       Animated.parallel([
         Animated.sequence([
           Animated.timing(pulse, { toValue: 2.2, duration: 1400, useNativeDriver: true }),
@@ -165,77 +188,47 @@ export default function PlaceInBoxScreen() {
           Animated.timing(pulseOpacity, { toValue: 0, duration: 1400, useNativeDriver: true }),
         ]),
       ])
-    ).start();
+    );
+    anim.start();
+    return () => anim.stop();
   }, [phase]);
-
-  const handleStartPause = () => {
-    router.replace({
-      pathname: '/pausing',
-      params: { mode, category: category ?? '' },
-    });
-  };
 
   return (
     <View style={styles.container}>
 
-      {/* ── FAS 1: Touch-initiering ── */}
-      {phase === 'touch' && (
-        <View style={styles.touchScreen}>
-          <Animated.Text style={[styles.title, { fontSize: 18, marginBottom: -28, opacity: hintOpacity }]}>
-            Håll händerna mot lådan för att starta
-          </Animated.Text>
-          <VideoView
-            ref={videoRef}
-            player={player}
-            style={styles.video}
-            nativeControls={false}
-            contentFit="contain"
-          />
-          <TouchableOpacity
-            style={styles.devButton}
-            onPressIn={() => {
-              player.currentTime = 0;
-              player.play();
-              touchTimerRef.current = setTimeout(fadeHint, 1500);
-            }}
-            onPressOut={() => {
-              player.pause();
-              if (touchTimerRef.current) {
-                clearTimeout(touchTimerRef.current);
-                touchTimerRef.current = null;
-              }
-            }}
-          >
-            <Text style={styles.devText}>Simulera touch-funktion</Text>
-          </TouchableOpacity>
+      {/* ── Tumgesten ── */}
+      {(phase === 'checking_in' || phase === 'idle') && (
+        <View style={styles.centerScreen}>
+          <Animated.View style={[styles.circle, { transform: [{ scale: breathe }] }]} />
+          <Text style={styles.title}>CHECKA IN{'\n'}MED TUMMARNA</Text>
+          <View style={styles.checkinRow}>
+            <View style={[styles.touchMarker, touches.left && styles.touchMarkerActive]} />
+            <View style={styles.ringWrap}>
+              <View style={styles.ringTrack} />
+              <Animated.View
+                style={[
+                  styles.ringFillClip,
+                  {
+                    height: ringFill.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }),
+                  },
+                ]}
+              />
+            </View>
+            <View style={[styles.touchMarker, touches.right && styles.touchMarkerActive]} />
+          </View>
         </View>
       )}
 
-      {/* ── FAS 2: NFC-scan (insida) ── */}
-      {phase === 'nfc2' && (
-        <>
-          <View style={styles.pulseWrapper}>
-            <Animated.View style={[styles.circle, { transform: [{ scale: breathe }] }]} />
-          </View>
-          <Text style={styles.title}>Lägg ner telefonen i lådan{'\n'}</Text>
-          <Text style={styles.subtitle}>Väntar på NFC...</Text>
-          <TouchableOpacity
-            style={styles.devButton}
-            onPress={() => {
-              sendMessageToDevice('NFC_SCANNED');
-              nfcActiveRef.current = false;
-              NfcManager.cancelTechnologyRequest().catch(() => {});
-              setPhase('lid');
-            }}
-          >
-            <Text style={styles.devText}>Simulera NFC-tagg</Text>
-          </TouchableOpacity>
-        </>
+      {/* ── Lägg ner telefonen ── */}
+      {phase === 'checked_in' && (
+        <View style={styles.centerScreen}>
+          <Text style={styles.title}>{phoneFlat ? 'LÄGG PÅ\nLOCKET' : 'LÄGG NER\nTELEFONEN'}</Text>
+        </View>
       )}
 
-      {/* ── FAS 3: Väntar på locket ── */}
-      {phase === 'lid' && (
-        <>
+      {/* ── Stäng locket ── */}
+      {phase === 'awaiting_lid' && (
+        <View style={styles.centerScreen}>
           <View style={styles.pulseWrapper}>
             <Animated.View
               style={[
@@ -243,17 +236,10 @@ export default function PlaceInBoxScreen() {
                 { transform: [{ scale: pulse }], opacity: pulseOpacity },
               ]}
             />
-            <Animated.View style={[styles.circle, styles.circleActive]} />
+            <View style={[styles.circle, styles.circleActive]} />
           </View>
-          <Text style={styles.title}>Lägg på locket för{'\n'}att starta pausen</Text>
-
-          <TouchableOpacity
-            style={styles.devButton}
-            onPress={handleStartPause}
-          >
-            <Text style={styles.devText}>Simulera lockpåläggning</Text>
-          </TouchableOpacity>
-        </>
+          <Text style={styles.title}>STÄNG{'\n'}LOCKET</Text>
+        </View>
       )}
 
     </View>
@@ -263,17 +249,34 @@ export default function PlaceInBoxScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#0a0a1a',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 36,
   },
-  touchScreen: {
+  centerScreen: {
     flex: 1,
     alignSelf: 'stretch',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 36,
+    gap: 40,
+  },
+  title: {
+    fontSize: 26,
+    fontWeight: '900',
+    color: '#e8f0ff',
+    textAlign: 'center',
+    letterSpacing: 1,
+    lineHeight: 34,
+  },
+  circle: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: '#2e86de',
+    opacity: 0.5,
+  },
+  circleActive: {
+    opacity: 1,
   },
   pulseWrapper: {
     width: 180,
@@ -288,47 +291,40 @@ const styles = StyleSheet.create({
     borderRadius: 50,
     backgroundColor: 'rgba(46, 134, 222, 0.3)',
   },
-  circle: {
-    width: 100,
-    height: 100,
-    borderRadius: 50,
-    backgroundColor: '#2e86de',
-    opacity: 0.5,
+
+  // ── Checkin ──
+  checkinRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 28,
   },
-  circleActive: {
-    opacity: 1,
+  touchMarker: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.15)',
   },
-  title: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: 'white',
-    textAlign: 'center',
-    paddingHorizontal: 32,
-    lineHeight: 38,
+  touchMarkerActive: {
+    backgroundColor: '#27ae60',
+    borderColor: '#27ae60',
   },
-  subtitle: {
-    fontSize: 13,
-    color: '#444',
-    letterSpacing: 2,
+  ringWrap: {
+    width: RING_SIZE,
+    height: RING_SIZE,
+    borderRadius: RING_SIZE / 2,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderWidth: 2,
+    borderColor: 'rgba(46, 134, 222, 0.3)',
+    justifyContent: 'flex-end',
   },
-  video: {
-    alignSelf: 'stretch',
-    aspectRatio: 2 / 3,
+  ringTrack: {
+    ...StyleSheet.absoluteFillObject,
   },
-  touchHint: {
-    fontSize: 13,
-    color: '#555',
-    letterSpacing: 1,
-    textAlign: 'center',
-  },
-  devButton: {
-    marginTop: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 20,
-  },
-  devText: {
-    color: '#444',
-    fontSize: 12,
-    letterSpacing: 1,
+  ringFillClip: {
+    width: '100%',
+    backgroundColor: '#27ae60',
   },
 });

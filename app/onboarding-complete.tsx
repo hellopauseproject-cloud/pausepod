@@ -3,10 +3,13 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { router } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import { Animated, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useAuth } from '../contexts/AuthContext';
+import { supabase } from '../lib/supabase';
 import { getSelectedCategories } from './pauseLogger';
 import { getProfile } from './userProfile';
 
 export default function OnboardingCompleteScreen() {
+  const { user, completeOnboarding } = useAuth();
   const [hasFiles, setHasFiles] = useState(false);
   const [hasProfile, setHasProfile] = useState(false);
   const [hasCategories, setHasCategories] = useState(false);
@@ -56,6 +59,34 @@ export default function OnboardingCompleteScreen() {
   }, []);
 
   const allDone = hasFiles && hasProfile && hasCategories;
+
+  const handleComplete = async () => {
+    if (!user?.id) {
+      router.replace('/(tabs)' as never);
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from('profiles')
+      .update({ onboarding_completed: true })
+      .eq('id', user.id)
+      .select('id');
+
+    // Rad saknas (Google OAuth skapar ingen profil automatiskt) — INSERT
+    if (!error && (!data || data.length === 0)) {
+      const username =
+        user.user_metadata?.username ??
+        user.user_metadata?.name ??
+        user.email?.split('@')[0] ??
+        'user';
+      await supabase
+        .from('profiles')
+        .insert({ id: user.id, username, onboarding_completed: true, show_stats: false });
+    }
+
+    await completeOnboarding();
+    router.replace('/(tabs)' as never);
+  };
 
   return (
     <View style={styles.container}>
@@ -148,7 +179,7 @@ export default function OnboardingCompleteScreen() {
       <Animated.View style={[{ width: '100%' }, { opacity: buttonAnim }]}>
         <TouchableOpacity
           style={styles.button}
-          onPress={() => router.replace('/(tabs)')}
+          onPress={handleComplete}
         >
           <Text style={styles.buttonText}>
             {allDone ? 'Börja din resa →' : 'Fortsätt ändå →'}

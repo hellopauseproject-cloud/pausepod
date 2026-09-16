@@ -1,7 +1,40 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system/legacy';
 
 const LOG_PATH = FileSystem.documentDirectory + 'pauseLogs.json';
 const CATEGORIES_PATH = FileSystem.documentDirectory + 'selectedCategories.json';
+
+const SESSION_CHECKPOINT_KEY = 'active_pause_session_checkpoint';
+
+export interface SessionCheckpoint {
+  startedAt: string;
+  userId: string;
+  category?: string;
+  pauseType: 'session' | 'regulate';
+  targetSeconds?: number;
+  sharedSessionId?: string;
+}
+
+export const saveSessionCheckpoint = async (checkpoint: SessionCheckpoint): Promise<void> => {
+  try {
+    await AsyncStorage.setItem(SESSION_CHECKPOINT_KEY, JSON.stringify(checkpoint));
+  } catch (e) {}
+};
+
+export const loadSessionCheckpoint = async (): Promise<SessionCheckpoint | null> => {
+  try {
+    const raw = await AsyncStorage.getItem(SESSION_CHECKPOINT_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+};
+
+export const clearSessionCheckpoint = async (): Promise<void> => {
+  try {
+    await AsyncStorage.removeItem(SESSION_CHECKPOINT_KEY);
+  } catch (e) {}
+};
 
 export const DEFAULT_CATEGORIES = [
 { id: 'focus', label: 'FOKUS', emoji: '🎯' },
@@ -33,7 +66,7 @@ export interface Interruption {
 export interface PauseLog {
   date: string;
   duration: number;
-  mode: 'regulate' | 'session';
+  mode: 'session';
   category?: string;
   interruptions?: Interruption[];
   totalInterruptionMs?: number;
@@ -66,9 +99,27 @@ export const getSelectedCategories = async (): Promise<Category[]> => {
   }
 };
 
+export const getAllCategories = async (): Promise<Category[]> => {
+  let customCats: Category[] = [];
+  try {
+    const custom = await FileSystem.readAsStringAsync(CUSTOM_CATEGORIES_PATH);
+    customCats = JSON.parse(custom);
+  } catch (e) {}
+  return [...DEFAULT_CATEGORIES, ...customCats];
+};
+
+export const findCategoryById = async (id: string): Promise<Category | null> => {
+  let customCats: Category[] = [];
+  try {
+    const custom = await FileSystem.readAsStringAsync(CUSTOM_CATEGORIES_PATH);
+    customCats = JSON.parse(custom);
+  } catch (e) {}
+  return [...DEFAULT_CATEGORIES, ...customCats].find(c => c.id === id) ?? null;
+};
+
 export const logPause = async (
   duration: number,
-  mode: 'regulate' | 'session',
+  mode: 'session',
   category?: string,
   interruptions?: Interruption[],
 ) => {

@@ -1,23 +1,38 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { createContext, useContext, useRef, useState } from 'react';
 import { PermissionsAndroid, Platform } from 'react-native';
-import { BleManager, Device } from 'react-native-ble-plx';
+import { BleManager, ConnectionPriority, Device } from 'react-native-ble-plx';
+import { BoxMessage, encodePhoneDown, encodeSessionAck, encodeSetMode, encodeTimeSync, parseBoxMessage } from '../lib/bleProtocol';
 
 const SERVICE_UUID = '12345678-1234-1234-1234-123456789012';
 const CHARACTERISTIC_UUID = 'abcdefab-cdef-abcd-efab-cdefabcdefab';
 
-export type BLEMessage = 'TOUCH_START' | 'TOUCH_END' | 'LID_CLOSED' | 'LID_OPEN';
+// Vilken låda den här telefonen senast parades med. Ett riktigt
+// parningsflöde (byta låda från profilen) är utanför scope här —
+// första lådan som säger hello blir "vår" tills vidare.
+const PAIRED_BOX_KEY = 'paired_box_id';
+
+const REQUESTED_MTU = 185;
 
 export const BLEControlContext = createContext<{
   connectToPausePod: () => void;
   disconnect: () => void;
   isConnected: boolean;
   isScanning: boolean;
+  /** Id på den låda vi just nu är anslutna till, om någon. */
+  boxId: string | null;
+  /** Är den anslutna lådan samma som senast parades med den här telefonen?
+   *  Styr om lådans `state`-meddelande får kapa skärmen (se BLEContext). */
+  isPairedBox: boolean;
 } | null>(null);
 
 export const BLEMessageContext = createContext<{
-  bleMessage: BLEMessage | null;
+  boxMessage: BoxMessage | null;
   resetMessage: () => void;
-  sendMessageToDevice: (message: string) => Promise<void>;
+  sendSessionAck: (seq: string) => Promise<void>;
+  sendSetMode: (mode: string) => Promise<void>;
+  /** Rent kosmetisk signal från appens egen accelerometer — lådan ignorerar den idag. */
+  sendPhoneDown: () => Promise<void>;
 } | null>(null);
 
 const manager = new BleManager();
@@ -26,9 +41,11 @@ const isConnectedRef = { current: false };
 const subscriptionRef = { current: null as any };
 
 export function BLEProvider({ children }: { children: React.ReactNode }) {
-  const [bleMessage, setBleMessage] = useState<BLEMessage | null>(null);
+  const [boxMessage, setBoxMessage] = useState<BoxMessage | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
+  const [boxId, setBoxId] = useState<string | null>(null);
+  const [isPairedBox, setIsPairedBox] = useState(false);
   const deviceRef = useRef<Device | null>(null);
 
   const requestPermissions = async () => {
@@ -39,6 +56,37 @@ export function BLEProvider({ children }: { children: React.ReactNode }) {
         PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
       ]);
     }
+  };
+
+  const sendRaw = async (message: string) => {
+    if (!deviceRef.current) {
+      console.log('BLE: Kan inte skicka — ingen ansluten enhet');
+      return;
+    }
+    try {
+      const base64 = btoa(message);
+      await deviceRef.current.writeCharacteristicWithResponseForService(
+        SERVICE_UUID,
+        CHARACTERISTIC_UUID,
+        base64
+      );
+    } catch (e) {
+      console.log('BLE: Fel vid skrivning:', e);
+    }
+  };
+
+  // hello konsumeras här internt — den blir aldrig ett boxMessage som
+  // vidarebefordras till SessionContext. time_sync måste ut innan lådan
+  // börjar skicka state/backlog, så det sker synkront i samma handler.
+  const handleHello = async (boxIdFromDevice: string) => {
+    setBoxId(boxIdFromDevice);
+    let paired = await AsyncStorage.getItem(PAIRED_BOX_KEY);
+    if (!paired) {
+      paired = boxIdFromDevice;
+      await AsyncStorage.setItem(PAIRED_BOX_KEY, paired);
+    }
+    setIsPairedBox(paired === boxIdFromDevice);
+    sendRaw(encodeTimeSync(Date.now()));
   };
 
   const connectToPausePod = async () => {
@@ -72,6 +120,23 @@ export function BLEProvider({ children }: { children: React.ReactNode }) {
               setIsConnected(true);
               console.log('BLE: Ansluten till PausePod');
 
+              try {
+                await connected.requestMTU(REQUESTED_MTU);
+              } catch (e) {
+                console.log('BLE: MTU-förhandling misslyckades (ok, faller tillbaka på standard):', e);
+              }
+
+              // Android-only — begär kort connection interval under incheckning.
+              // iOS saknar motsvarande API på central-sidan; där måste lådan
+              // själv föreslå parametrarna (esp_ble_gap_update_conn_params).
+              if (Platform.OS === 'android') {
+                try {
+                  await connected.requestConnectionPriority(ConnectionPriority.High);
+                } catch (e) {
+                  console.log('BLE: connection priority-förfrågan misslyckades:', e);
+                }
+              }
+
               subscriptionRef.current = connected.monitorCharacteristicForService(
                 SERVICE_UUID,
                 CHARACTERISTIC_UUID,
@@ -80,13 +145,17 @@ export function BLEProvider({ children }: { children: React.ReactNode }) {
                     console.log('BLE monitor-fel:', err);
                     return;
                   }
-                  if (characteristic?.value) {
-                    const decoded = atob(characteristic.value);
-                    const valid: BLEMessage[] = ['TOUCH_START', 'TOUCH_END', 'LID_CLOSED', 'LID_OPEN'];
-                    if (valid.includes(decoded as BLEMessage)) {
-                      setBleMessage(decoded as BLEMessage);
-                    }
+                  if (!characteristic?.value) return;
+
+                  const decoded = atob(characteristic.value);
+                  const parsed = parseBoxMessage(decoded);
+                  if (!parsed) return;
+
+                  if (parsed.type === 'hello') {
+                    handleHello(parsed.boxId);
+                    return;
                   }
+                  setBoxMessage(parsed);
                 }
               );
             } catch (e) {
@@ -106,31 +175,18 @@ export function BLEProvider({ children }: { children: React.ReactNode }) {
     isConnectedRef.current = false;
     isConnectingRef.current = false;
     setIsConnected(false);
-    setBleMessage(null);
+    setBoxMessage(null);
+    setBoxId(null);
+    setIsPairedBox(false);
   };
 
-  const resetMessage = () => setBleMessage(null);
+  const resetMessage = () => setBoxMessage(null);
+  const sendSessionAck = (seq: string) => sendRaw(encodeSessionAck(seq));
+  const sendSetMode = (mode: string) => sendRaw(encodeSetMode(mode));
+  const sendPhoneDown = () => sendRaw(encodePhoneDown());
 
-  const sendMessageToDevice = async (message: string) => {
-    if (!deviceRef.current) {
-      console.log('BLE: Kan inte skicka — ingen ansluten enhet');
-      return;
-    }
-    try {
-      const base64 = btoa(message);
-      await deviceRef.current.writeCharacteristicWithResponseForService(
-        SERVICE_UUID,
-        CHARACTERISTIC_UUID,
-        base64
-      );
-      console.log('BLE: Skickade till enhet:', message);
-    } catch (e) {
-      console.log('BLE: Fel vid skrivning:', e);
-    }
-  };
-
-  const controlValue = { connectToPausePod, disconnect, isConnected, isScanning };
-  const messageValue = { bleMessage, resetMessage, sendMessageToDevice };
+  const controlValue = { connectToPausePod, disconnect, isConnected, isScanning, boxId, isPairedBox };
+  const messageValue = { boxMessage, resetMessage, sendSessionAck, sendSetMode, sendPhoneDown };
 
   return (
     <BLEControlContext.Provider value={controlValue}>

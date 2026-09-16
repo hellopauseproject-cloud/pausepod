@@ -1,116 +1,161 @@
 import { FontAwesome, FontAwesome5 } from '@expo/vector-icons';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
-import { Audio } from 'expo-av';
+import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import * as FileSystem from 'expo-file-system/legacy';
 import { router } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
-import { Animated, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { getProfile } from './userProfile';
+import { Animated, Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { supabase } from '../lib/supabase';
+import { clearPending, getPending } from '../lib/supportQueue';
 
 export default function VoiceScreen() {
-  const [sound, setSound] = useState<Audio.Sound | null>(null);
+  const pickupPlayer = useAudioPlayer(require('../assets/images/Pickupsound.mp3'));
+  const voicePlayer = useAudioPlayer(null);
+  const hangupPlayer = useAudioPlayer(require('../assets/images/HangUpSound.mp3'));
+  const voiceStatus = useAudioPlayerStatus(voicePlayer);
+
   const [speakerOn, setSpeakerOn] = useState(false);
   const [callerName, setCallerName] = useState('Dig själv');
+  const [callerPhoto, setCallerPhoto] = useState<string | null>(null);
   const [noFile, setNoFile] = useState(false);
   const [showReplay, setShowReplay] = useState(false);
   const [showPauseLink, setShowPauseLink] = useState(false);
   const fadeAnim = useRef(new Animated.Value(0)).current;
-  const soundRef = useRef<Audio.Sound | null>(null);
+  const markedRef = useRef(false);
+  const supportResponseIdRef = useRef<string | null>(null);
 
   useEffect(() => {
+    if (voiceStatus.didJustFinish) {
+      setShowReplay(true);
+    }
+  }, [voiceStatus.didJustFinish]);
+
+  // Mark support response as played when audio starts
+  useEffect(() => {
+    if (voiceStatus.playing && !markedRef.current) {
+      const pending = getPending();
+      if (pending?.responseType === 'voice') {
+        markedRef.current = true;
+        const now = new Date().toISOString();
+        supabase.from('support_responses').update({ delivered_at: now, played_at: now }).eq('id', pending.id);
+        clearPending();
+      }
+    }
+  }, [voiceStatus.playing]);
+
+  useEffect(() => {
+    let mounted = true;
+
     const load = async () => {
-      const profile = await getProfile();
-      setCallerName(profile.name || 'Dig själv');
+      const pending = getPending();
 
+      if (pending?.responseType === 'voice') {
+        supportResponseIdRef.current = pending.id;
+        setCallerName(pending.senderName);
+        if (pending.senderAvatarUrl) setCallerPhoto(pending.senderAvatarUrl);
+      } else {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!mounted) return;
+        if (session?.user?.id) {
+          const { data: profile } = await supabase
+            .from('profiles').select('username, avatar_url').eq('id', session.user.id).maybeSingle();
+          if (!mounted) return;
+          setCallerName(profile?.username || 'Dig själv');
+          if (profile?.avatar_url?.startsWith('https://')) setCallerPhoto(profile.avatar_url);
+        }
+      }
+
+      if (!mounted) return;
       await new Promise(resolve => setTimeout(resolve, 600));
+      if (!mounted) return;
 
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true,
-        shouldDuckAndroid: true,
-        playThroughEarpieceAndroid: true,
+      await setAudioModeAsync({
+        allowsRecording: false,
+        playsInSilentMode: true,
+        interruptionMode: 'duckOthers',
+        shouldRouteThroughEarpiece: true,
       });
 
-      const { sound: pickupSound } = await Audio.Sound.createAsync(
-        require('../assets/images/Pickupsound.mp3')
-      );
-      await pickupSound.playAsync();
+      if (!mounted) return;
+      pickupPlayer.play();
       await new Promise(resolve => setTimeout(resolve, 1000));
-      await pickupSound.unloadAsync();
+      if (!mounted) return;
 
-      let audioUri: { uri: string } | null = null;
+      // Support response: play from URL
+      if (pending?.responseType === 'voice' && pending.contentUrl) {
+        voicePlayer.replace({ uri: pending.contentUrl });
+        voicePlayer.play();
+        return;
+      }
+
+      // Existing behaviour: play from local file
+      let audioUri: string | null = null;
       try {
         const savedFiles = await FileSystem.readAsStringAsync(
           FileSystem.documentDirectory + 'selectedFiles.json'
         );
         const { voice } = JSON.parse(savedFiles);
-        if (voice) audioUri = { uri: voice };
+        if (voice) audioUri = voice;
       } catch (e) {}
+
+      if (!mounted) return;
 
       if (!audioUri) {
         setNoFile(true);
         return;
       }
 
-      const { sound } = await Audio.Sound.createAsync(audioUri);
-      soundRef.current = sound;
-      setSound(sound);
-
-      sound.setOnPlaybackStatusUpdate((status) => {
-        if (status.isLoaded && status.didJustFinish) {
-          setShowReplay(true);
-        }
-      });
-
-      await sound.playAsync();
+      voicePlayer.replace({ uri: audioUri });
+      voicePlayer.play();
     };
 
     load();
 
     const pauseTimer = setTimeout(() => {
+      if (!mounted) return;
       setShowPauseLink(true);
       Animated.timing(fadeAnim, {
         toValue: 1,
-        duration: 1000,
+        duration: 600,
         useNativeDriver: true,
       }).start();
-    }, 5000);
+    }, 1500);
 
     return () => {
+      mounted = false;
       clearTimeout(pauseTimer);
-      soundRef.current?.stopAsync();
-      soundRef.current?.unloadAsync();
+      try { voicePlayer.pause(); } catch {}
     };
   }, []);
 
   const handleReplay = async () => {
     setShowReplay(false);
-    await sound?.replayAsync();
+    await voicePlayer.seekTo(0);
+    voicePlayer.play();
   };
 
   const toggleSpeaker = async () => {
     const newSpeakerOn = !speakerOn;
     setSpeakerOn(newSpeakerOn);
-    await Audio.setAudioModeAsync({
-      allowsRecordingIOS: false,
-      playsInSilentModeIOS: true,
-      shouldDuckAndroid: true,
-      playThroughEarpieceAndroid: !newSpeakerOn,
+    await setAudioModeAsync({
+      allowsRecording: false,
+      playsInSilentMode: true,
+      interruptionMode: 'duckOthers',
+      shouldRouteThroughEarpiece: !newSpeakerOn,
     });
   };
 
   const handleHangUp = async () => {
+    voicePlayer.pause();
+    // Guarantee DB write is committed before navigating back (idempotent update)
+    if (supportResponseIdRef.current) {
+      const ts = new Date().toISOString();
+      await supabase.from('support_responses').update({ delivered_at: ts, played_at: ts }).eq('id', supportResponseIdRef.current);
+      supportResponseIdRef.current = null;
+    }
     try {
-      await sound?.stopAsync();
-      await sound?.unloadAsync();
-    } catch (e) {}
-    try {
-      const { sound: hangUpSound } = await Audio.Sound.createAsync(
-        require('../assets/images/HangUpSound.mp3')
-      );
-      await hangUpSound.playAsync();
+      hangupPlayer.play();
       setTimeout(() => {
-        hangUpSound.unloadAsync();
         router.replace('/(tabs)');
       }, 400);
     } catch (e) {
@@ -118,17 +163,26 @@ export default function VoiceScreen() {
     }
   };
 
-  const handlePauseLink = () => {
-    sound?.pauseAsync();
+  const handlePauseLink = async () => {
+    voicePlayer.pause();
+    if (supportResponseIdRef.current) {
+      const ts = new Date().toISOString();
+      await supabase.from('support_responses').update({ delivered_at: ts, played_at: ts }).eq('id', supportResponseIdRef.current);
+      supportResponseIdRef.current = null;
+    }
     router.push('/pause');
   };
 
   return (
     <View style={styles.container}>
       <View style={styles.callerInfo}>
-        <View style={styles.avatar}>
-          <FontAwesome5 name="user" size={48} color="#2e86de" />
-        </View>
+        {callerPhoto ? (
+          <Image source={{ uri: callerPhoto }} style={styles.avatar} />
+        ) : (
+          <View style={styles.avatar}>
+            <FontAwesome5 name="user" size={48} color="#2e86de" />
+          </View>
+        )}
         <Text style={styles.callerName}>{callerName}</Text>
         <Text style={styles.callerSubtitle}>
           {noFile ? 'Inget röstmeddelande uppladdat' : showReplay ? 'Meddelandet är slut' : 'Röstsamtal pågår...'}
@@ -144,8 +198,9 @@ export default function VoiceScreen() {
 
         {showPauseLink && (
           <Animated.View style={{ opacity: fadeAnim }}>
-            <TouchableOpacity onPress={handlePauseLink}>
-              <Text style={styles.pauseLink}>Tryck här för att ta en paus</Text>
+            <TouchableOpacity style={styles.pauseBtn} onPress={handlePauseLink} activeOpacity={0.85}>
+              <FontAwesome name="pause" size={16} color="white" />
+              <Text style={styles.pauseBtnText}>TA EN PAUS</Text>
             </TouchableOpacity>
           </Animated.View>
         )}
@@ -203,12 +258,25 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: '#2e86de',
   },
-  pauseLink: {
-    color: '#2e86de',
-    fontSize: 16,
-    textDecorationLine: 'underline',
-    marginVertical: 4,
-    textAlign: 'center',
+  pauseBtn: {
+    backgroundColor: '#2e86de',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 14,
+    paddingHorizontal: 28,
+    borderRadius: 40,
+    shadowColor: '#2e86de',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.4,
+    shadowRadius: 16,
+    elevation: 10,
+  },
+  pauseBtnText: {
+    color: 'white',
+    fontSize: 15,
+    fontWeight: '700',
+    letterSpacing: 3,
   },
   speakerButton: {
     alignItems: 'center',

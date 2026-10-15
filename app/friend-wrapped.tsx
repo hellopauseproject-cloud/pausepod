@@ -1,6 +1,6 @@
-import { FontAwesome5, Octicons } from '@expo/vector-icons';
+import { FontAwesome5 } from '@expo/vector-icons';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
   Dimensions,
@@ -11,8 +11,10 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { DEMO_WRAPPED } from '../lib/demoFriends';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { supabase } from '../lib/supabase';
+import { AppPalette, alpha } from '../constants/appTheme';
+import { usePalette } from '../contexts/ThemeContext';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -24,7 +26,6 @@ type WrappedData = {
   avgMinutes: number;
   topIntention: string | null;
   topIntentionEmoji: string | null;
-  friendInsight: string | null;
   avatarUrl: string | null;
   sharedPauseCount: number;
   bestBuddy: { username: string; avatarUrl: string | null } | null;
@@ -35,6 +36,11 @@ type PageConfig = {
   accentColor: string;
   render: (data: WrappedData, username: string) => React.ReactNode;
 };
+
+// Sidlistan är modulnivå-data med render-callbacks i sig, och kan därför inte
+// hämta paletten ur en krok. Den byggs i stället av skärmen, som skickar in
+// både paletten och sina färdiga stilar.
+type WrappedStyles = ReturnType<typeof makeStyles>;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -49,157 +55,157 @@ function formatMinutes(minutes: number): string {
 
 const CATEGORY_INFO: Record<string, { label: string; emoji: string }> = {
   // By ID
-  focus:    { label: 'FOKUS',      emoji: '🎯' },
-  walk:     { label: 'PROMENAD',   emoji: '🚶' },
-  workout:  { label: 'TRÄNING',    emoji: '💪' },
-  social:   { label: 'SOCIALT',    emoji: '💬' },
-  clean:    { label: 'STÄDA',      emoji: '🧹' },
+  focus:    { label: 'FOCUS',      emoji: '🎯' },
+  walk:     { label: 'WALK',       emoji: '🚶' },
+  workout:  { label: 'WORKOUT',    emoji: '💪' },
+  social:   { label: 'SOCIAL',     emoji: '💬' },
+  clean:    { label: 'CLEAN',      emoji: '🧹' },
   meditate: { label: 'MEDITATION', emoji: '🧘' },
-  read:     { label: 'LÄSNING',    emoji: '📖' },
-  study:    { label: 'STUDIER',    emoji: '✏️' },
-  rest:     { label: 'VILA',       emoji: '😴' },
-  create:   { label: 'SKAPANDE',   emoji: '🎨' },
-  music:    { label: 'MUSIK',      emoji: '🎵' },
-  nature:   { label: 'NATUR',      emoji: '🌲' },
+  read:     { label: 'READING',    emoji: '📖' },
+  study:    { label: 'STUDY',      emoji: '✏️' },
+  rest:     { label: 'REST',       emoji: '😴' },
+  create:   { label: 'CREATE',     emoji: '🎨' },
+  music:    { label: 'MUSIC',      emoji: '🎵' },
+  nature:   { label: 'NATURE',     emoji: '🌲' },
   // By label (new data stored with human-readable label)
-  FOKUS:      { label: 'FOKUS',      emoji: '🎯' },
-  PROMENAD:   { label: 'PROMENAD',   emoji: '🚶' },
-  TRÄNING:    { label: 'TRÄNING',    emoji: '💪' },
-  SOCIALT:    { label: 'SOCIALT',    emoji: '💬' },
-  STÄDA:      { label: 'STÄDA',      emoji: '🧹' },
+  FOCUS:      { label: 'FOCUS',      emoji: '🎯' },
+  WALK:       { label: 'WALK',       emoji: '🚶' },
+  WORKOUT:    { label: 'WORKOUT',    emoji: '💪' },
+  SOCIAL:     { label: 'SOCIAL',     emoji: '💬' },
+  CLEAN:      { label: 'CLEAN',      emoji: '🧹' },
   MEDITATION: { label: 'MEDITATION', emoji: '🧘' },
-  LÄSNING:    { label: 'LÄSNING',    emoji: '📖' },
-  STUDIER:    { label: 'STUDIER',    emoji: '✏️' },
-  VILA:       { label: 'VILA',       emoji: '😴' },
-  SKAPANDE:   { label: 'SKAPANDE',   emoji: '🎨' },
-  MUSIK:      { label: 'MUSIK',      emoji: '🎵' },
-  NATUR:      { label: 'NATUR',      emoji: '🌲' },
+  READING:    { label: 'READING',    emoji: '📖' },
+  STUDY:      { label: 'STUDY',      emoji: '✏️' },
+  REST:       { label: 'REST',       emoji: '😴' },
+  CREATE:     { label: 'CREATE',     emoji: '🎨' },
+  MUSIC:      { label: 'MUSIC',      emoji: '🎵' },
+  NATURE:     { label: 'NATURE',     emoji: '🌲' },
 };
 
 // ─── Intention statements per category ───────────────────────────────────────
 
 const INTENTION_STATEMENT: Record<string, (u: string) => string> = {
-  FOKUS:      u => `${u} lade ner tid på djupt fokusarbete den här veckan.`,
-  PROMENAD:   u => `${u} kom ut i friska luften och rörde på sig den här veckan.`,
-  TRÄNING:    u => `${u} prioriterade kroppen och träningen den här veckan.`,
-  SOCIALT:    u => `${u} spenderade tid med nära och kära den här veckan.`,
-  STÄDA:      u => `${u} skapade ordning och reda runt sig den här veckan.`,
-  MEDITATION: u => `${u} tog sig tid för stilla närvaro den här veckan.`,
-  LÄSNING:    u => `${u} bytte scrollning mot riktiga berättelser den här veckan.`,
-  STUDIER:    u => `${u} investerade tid i lärande den här veckan.`,
-  VILA:       u => `${u} gav sig själv tillåtelse att vila ordentligt den här veckan.`,
-  SKAPANDE:   u => `${u} lät kreativiteten flöda den här veckan.`,
-  MUSIK:      u => `${u} fann ro i musiken den här veckan.`,
-  NATUR:      u => `${u} hittade tillbaka till naturen den här veckan.`,
+  FOCUS:      u => `${u} spent time on deep focus work this week.`,
+  WALK:       u => `${u} got out for fresh air and moved this week.`,
+  WORKOUT:    u => `${u} prioritized their body and exercise this week.`,
+  SOCIAL:     u => `${u} spent time with loved ones this week.`,
+  CLEAN:      u => `${u} created order around themselves this week.`,
+  MEDITATION: u => `${u} made time for quiet presence this week.`,
+  READING:    u => `${u} traded scrolling for real stories this week.`,
+  STUDY:      u => `${u} invested time in learning this week.`,
+  REST:       u => `${u} gave themselves permission to rest properly this week.`,
+  CREATE:     u => `${u} let creativity flow this week.`,
+  MUSIC:      u => `${u} found peace in music this week.`,
+  NATURE:     u => `${u} found their way back to nature this week.`,
 };
 
 // ─── Page definitions ─────────────────────────────────────────────────────────
 
-const BASE_PAGES: PageConfig[] = [
+const makePages = (Palette: AppPalette, styles: WrappedStyles): PageConfig[] => [
   {
-    bg: '#0d1220',
-    accentColor: '#2e86de',
+    bg: Palette.tintBlue,
+    accentColor: Palette.accent,
     render: (data, username) => (
       <View style={styles.page}>
-        <Text style={styles.pageEyebrow}>VECKANS SAMMANFATTNING</Text>
-        <Text style={[styles.pageNumber, { color: '#2e86de' }]}>
+        <Text style={styles.pageEyebrow}>WEEKLY SUMMARY</Text>
+        <Text style={[styles.pageNumber, { color: Palette.accent }]}>
           {data.sessionCount}
         </Text>
         <Text style={styles.pageStatement}>
-          {username} tog {data.sessionCount === 1 ? 'en paus' : `${data.sessionCount} pauser`} den här veckan.
+          {username} took {data.sessionCount === 1 ? 'one pause' : `${data.sessionCount} pauses`} this week.
         </Text>
         {data.sessionCount === 0 && (
-          <Text style={styles.pageSubtle}>Inga avslutade pauser de senaste 7 dagarna.</Text>
+          <Text style={styles.pageSubtle}>No completed pauses in the last 7 days.</Text>
         )}
         {data.sessionCount >= 5 && (
-          <Text style={styles.pageSubtle}>Det är riktigt bra.</Text>
+          <Text style={styles.pageSubtle}>That's really great.</Text>
         )}
       </View>
     ),
   },
   {
-    bg: '#0a1a2a',
-    accentColor: '#5ba8f5',
+    bg: Palette.tintBlue,
+    accentColor: Palette.accentSoft,
     render: (data, username) => (
       <View style={styles.page}>
-        <Text style={styles.pageEyebrow}>GENOMSNITTSTID PER PAUS</Text>
-        <Text style={[styles.pageNumber, { color: '#5ba8f5' }]}>
+        <Text style={styles.pageEyebrow}>AVERAGE TIME PER PAUSE</Text>
+        <Text style={[styles.pageNumber, { color: Palette.accentSoft }]}>
           {data.sessionCount > 0 ? formatMinutes(data.avgMinutes) : '—'}
         </Text>
         <Text style={styles.pageStatement}>
           {data.sessionCount > 0
-            ? `Varje paus varade i snitt ${formatMinutes(data.avgMinutes)}.`
-            : `${username} har inga avslutade pauser den här veckan ännu.`}
+            ? `Each pause lasted an average of ${formatMinutes(data.avgMinutes)}.`
+            : `${username} has no completed pauses this week yet.`}
         </Text>
         {data.avgMinutes >= 20 && (
-          <Text style={styles.pageSubtle}>Djup närvaro kräver tid. Bra.</Text>
+          <Text style={styles.pageSubtle}>Deep presence takes time. Nice.</Text>
         )}
       </View>
     ),
   },
   {
-    bg: '#0d1a14',
-    accentColor: '#2ecc71',
+    bg: Palette.tintGreen,
+    accentColor: Palette.slideAccent.green,
     render: (data, username) => (
       <View style={styles.page}>
-        <Text style={styles.pageEyebrow}>VANLIGASTE INTENTION</Text>
+        <Text style={styles.pageEyebrow}>MOST COMMON INTENTION</Text>
         {data.topIntention ? (
           <>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
               <Text style={[styles.pageEmoji, { fontSize: 36 }]}>{data.topIntentionEmoji ?? '⏸'}</Text>
-              <Text style={[styles.pageNumber, { color: '#2ecc71', fontSize: 36 }]}>
+              <Text style={[styles.pageNumber, { color: Palette.slideAccent.green, fontSize: 36 }]}>
                 {data.topIntention}
               </Text>
             </View>
             <Text style={styles.pageStatement}>
-              {INTENTION_STATEMENT[data.topIntention]?.(username) ?? `${username} pausade med avsikt den här veckan.`}
+              {INTENTION_STATEMENT[data.topIntention]?.(username) ?? `${username} paused with intention this week.`}
             </Text>
           </>
         ) : (
           <Text style={styles.pageStatement}>
-            {username} pausade utan en specifik intention den här veckan.
+            {username} paused without a specific intention this week.
           </Text>
         )}
       </View>
     ),
   },
   {
-    bg: '#150f20',
-    accentColor: '#9b59b6',
+    bg: Palette.tintPurple,
+    accentColor: Palette.slideAccent.violet,
     render: (data, username) => (
       <View style={styles.page}>
-        <Text style={styles.pageEyebrow}>TOTALT DEN HÄR VECKAN</Text>
-        <Text style={[styles.pageNumber, { color: '#9b59b6' }]}>
+        <Text style={styles.pageEyebrow}>TOTAL THIS WEEK</Text>
+        <Text style={[styles.pageNumber, { color: Palette.slideAccent.violet }]}>
           {data.sessionCount > 0 ? formatMinutes(data.totalMinutes) : '0 min'}
         </Text>
         <Text style={styles.pageStatement}>
           {data.sessionCount > 0
-            ? `${username} var frånkopplad i ${formatMinutes(data.totalMinutes)} den här veckan.`
-            : `${username} är på väg — varje liten paus räknas.`}
+            ? `${username} was disconnected for ${formatMinutes(data.totalMinutes)} this week.`
+            : `${username} is on their way — every little pause counts.`}
         </Text>
         <Text style={[styles.pageSubtle, { marginTop: 8 }]}>
-          Det är tid som bygger något, lite i taget.
+          It's time that builds something, little by little.
         </Text>
       </View>
     ),
   },
   {
-    bg: '#0d1a2a',
-    accentColor: '#5ba8f5',
+    bg: Palette.tintBlue,
+    accentColor: Palette.accentSoft,
     render: (data, username) => (
       <View style={styles.page}>
-        <Text style={styles.pageEyebrow}>PAUSADE TILLSAMMANS</Text>
-        <Text style={[styles.pageNumber, { color: '#5ba8f5' }]}>{data.sharedPauseCount}</Text>
+        <Text style={styles.pageEyebrow}>PAUSED TOGETHER</Text>
+        <Text style={[styles.pageNumber, { color: Palette.accentSoft }]}>{data.sharedPauseCount}</Text>
         <Text style={styles.pageStatement}>
           {data.sharedPauseCount === 0
-            ? `${username} hade inga delade pauser den här veckan.`
+            ? `${username} had no shared pauses this week.`
             : data.sharedPauseCount === 1
-            ? `${username} pausade med en vän den här veckan.`
-            : `${username} pausade med vänner ${data.sharedPauseCount} gånger.`}
+            ? `${username} paused with a friend this week.`
+            : `${username} paused with friends ${data.sharedPauseCount} times.`}
         </Text>
         {data.bestBuddy && (
           <View style={styles.buddyCard}>
-            <Text style={styles.buddyLabel}>FAVORITPAUSKOMPIS</Text>
+            <Text style={styles.buddyLabel}>FAVORITE PAUSE BUDDY</Text>
             <View style={styles.buddyRow}>
               {data.bestBuddy.avatarUrl ? (
                 <Image source={{ uri: data.bestBuddy.avatarUrl }} style={styles.buddyAvatar} />
@@ -215,28 +221,11 @@ const BASE_PAGES: PageConfig[] = [
   },
 ];
 
-const INSIGHT_PAGE: PageConfig = {
-  bg: '#0a0a18',
-  accentColor: '#a29bfe',
-  render: (data, username) => (
-    <View style={styles.page}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}>
-        <Text style={styles.pageEyebrow}>{username.toUpperCase()} DELAR EN TANKE</Text>
-        <Octicons name="north-star" size={10} color="rgba(255,255,255,0.3)" />
-      </View>
-      <Text style={{ fontSize: 64, color: 'rgba(162,155,254,0.2)', lineHeight: 64, marginBottom: -8 }}>"</Text>
-      <Text style={[styles.pageStatement, { fontStyle: 'italic', fontSize: 20, lineHeight: 30, color: 'rgba(255,255,255,0.9)' }]}>
-        {data.friendInsight}
-      </Text>
-      <Text style={{ fontSize: 64, color: 'rgba(162,155,254,0.2)', lineHeight: 64, textAlign: 'right', marginTop: -8 }}>"</Text>
-      <View style={{ height: 1, backgroundColor: 'rgba(162,155,254,0.15)', marginTop: 4 }} />
-    </View>
-  ),
-};
-
 // ─── Dot indicator ────────────────────────────────────────────────────────────
 
 function Dots({ count, activeIndex }: { count: number; activeIndex: number }) {
+  const Palette = usePalette();
+  const styles = useMemo(() => makeStyles(Palette), [Palette]);
   return (
     <View style={styles.dots}>
       {Array.from({ length: count }).map((_, i) => (
@@ -252,6 +241,9 @@ function Dots({ count, activeIndex }: { count: number; activeIndex: number }) {
 // ─── Main screen ──────────────────────────────────────────────────────────────
 
 export default function FriendWrappedScreen() {
+  const Palette = usePalette();
+  const styles = useMemo(() => makeStyles(Palette), [Palette]);
+  const insets = useSafeAreaInsets();
   const { friendId, friendUsername } = useLocalSearchParams<{
     friendId: string;
     friendUsername: string;
@@ -266,12 +258,6 @@ export default function FriendWrappedScreen() {
     const load = async () => {
       if (!friendId) return;
 
-      if (DEMO_WRAPPED[friendId]) {
-        setData(DEMO_WRAPPED[friendId]);
-        Animated.timing(fadeAnim, { toValue: 1, duration: 800, useNativeDriver: true }).start();
-        return;
-      }
-
       const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
       const [{ data: sessions }, { data: profile }] = await Promise.all([
@@ -279,11 +265,14 @@ export default function FriendWrappedScreen() {
           .from('pause_sessions')
           .select('duration_seconds, intention, shared_session_id')
           .eq('user_id', friendId)
+          // RLS släpper redan bara igenom vänners pauser (supabase/sleep.sql);
+          // filtret gör frågan sann även om policyn någon gång skrivs om.
+          .eq('kind', 'pause')
           .gte('started_at', sevenDaysAgo)
           .not('ended_at', 'is', null),
         supabase
           .from('profiles')
-          .select('weekly_insight, avatar_url')
+          .select('avatar_url')
           .eq('id', friendId)
           .maybeSingle(),
       ]);
@@ -305,7 +294,6 @@ export default function FriendWrappedScreen() {
         (a, b) => intentionCounts[b] - intentionCounts[a]
       )[0] ?? null;
       const topIntentionEmoji = topIntention ? (CATEGORY_INFO[topIntention]?.emoji ?? '⏸') : null;
-      const friendInsight = profile?.weekly_insight ?? null;
 
       const sharedRows = rows.filter(r => r.shared_session_id);
       const sharedPauseCount = sharedRows.length;
@@ -329,7 +317,7 @@ export default function FriendWrappedScreen() {
         }
       }
 
-      setData({ sessionCount, totalMinutes, avgMinutes, topIntention, topIntentionEmoji, friendInsight, avatarUrl: profile?.avatar_url ?? null, sharedPauseCount, bestBuddy });
+      setData({ sessionCount, totalMinutes, avgMinutes, topIntention, topIntentionEmoji, avatarUrl: profile?.avatar_url ?? null, sharedPauseCount, bestBuddy });
 
       Animated.timing(fadeAnim, { toValue: 1, duration: 800, useNativeDriver: true }).start();
     };
@@ -340,28 +328,28 @@ export default function FriendWrappedScreen() {
     if (viewableItems[0] != null) setActiveIndex(viewableItems[0].index ?? 0);
   }).current;
 
-  const allPages = data?.friendInsight ? [...BASE_PAGES, INSIGHT_PAGE] : BASE_PAGES;
+  const allPages = useMemo(() => makePages(Palette, styles), [Palette, styles]);
   const currentPage = allPages[activeIndex] ?? allPages[allPages.length - 1];
 
   if (!data) {
     return (
       <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
-        <Text style={styles.loadingText}>Laddar…</Text>
+        <Text style={styles.loadingText}>Loading…</Text>
       </View>
     );
   }
 
   return (
-    <Animated.View style={[styles.container, { opacity: fadeAnim, backgroundColor: currentPage.bg }]}>
+    <Animated.View style={[styles.container, { opacity: fadeAnim, backgroundColor: currentPage.bg, paddingTop: Math.max(60, insets.top + 8) }]}>
       {/* Close */}
-      <TouchableOpacity style={styles.closeBtn} onPress={() => router.back()} activeOpacity={0.7}>
-        <FontAwesome5 name="times" size={18} color="rgba(255,255,255,0.5)" />
+      <TouchableOpacity style={[styles.closeBtn, { top: Math.max(56, insets.top + 4) }]} onPress={() => router.back()} activeOpacity={0.7}>
+        <FontAwesome5 name="times" size={18} color={Palette.textSecondary} />
       </TouchableOpacity>
 
       {/* Name chip */}
       <View style={[styles.nameChip, { borderColor: currentPage.accentColor + '66' }]}>
         <Text style={[styles.nameChipText, { color: currentPage.accentColor }]}>
-          {friendUsername ?? 'Vän'}
+          {friendUsername ?? 'Friend'}
         </Text>
       </View>
       {/* Avatar */}
@@ -383,7 +371,7 @@ export default function FriendWrappedScreen() {
         viewabilityConfig={{ itemVisiblePercentThreshold: 60 }}
         renderItem={({ item }) => (
           <View style={{ width: SCREEN_WIDTH }}>
-            {item.render(data, friendUsername ?? 'Vän')}
+            {item.render(data, friendUsername ?? 'Friend')}
           </View>
         )}
       />
@@ -398,13 +386,13 @@ export default function FriendWrappedScreen() {
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
-const styles = StyleSheet.create({
+const makeStyles = (Palette: AppPalette) => StyleSheet.create({
   container: {
     flex: 1,
     paddingTop: 60,
   },
   loadingText: {
-    color: 'rgba(255,255,255,0.4)',
+    color: Palette.textSecondary,
     fontSize: 16,
   },
 
@@ -428,7 +416,7 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   nameChipText: {
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '700',
     letterSpacing: 2,
     textTransform: 'uppercase',
@@ -443,15 +431,15 @@ const styles = StyleSheet.create({
     gap: 20,
   },
   pageEyebrow: {
-    fontSize: 10,
+    fontSize: 12,
     fontWeight: '700',
-    color: 'rgba(255,255,255,0.3)',
+    color: Palette.ink30,
     letterSpacing: 3,
   },
   pageNumber: {
     fontSize: 80,
     fontWeight: '900',
-    color: '#ffffff',
+    color: Palette.textPrimary,
     lineHeight: 88,
     letterSpacing: -2,
   },
@@ -461,13 +449,13 @@ const styles = StyleSheet.create({
   pageStatement: {
     fontSize: 24,
     fontWeight: '700',
-    color: '#ffffff',
+    color: Palette.textPrimary,
     lineHeight: 34,
     letterSpacing: 0.2,
   },
   pageSubtle: {
     fontSize: 15,
-    color: 'rgba(255,255,255,0.4)',
+    color: Palette.ink40,
     lineHeight: 22,
   },
 
@@ -486,20 +474,20 @@ const styles = StyleSheet.create({
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: 'rgba(255,255,255,0.2)',
+    backgroundColor: Palette.ink20,
   },
   dotActive: {
-    backgroundColor: 'rgba(255,255,255,0.8)',
+    backgroundColor: Palette.ink80,
     width: 18,
   },
   swipeHint: {
-    fontSize: 13,
-    color: 'rgba(255,255,255,0.3)',
+    fontSize: 14,
+    color: Palette.ink30,
     letterSpacing: 0.5,
   },
   weekLabel: {
     alignSelf: 'center',
-    fontSize: 11,
+    fontSize: 12,
     letterSpacing: 2,
     marginTop: -10,
     marginBottom: 4,
@@ -511,7 +499,7 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     marginBottom: 12,
     borderWidth: 2,
-    borderColor: 'rgba(255,255,255,0.15)',
+    borderColor: Palette.ink15,
   },
   avatarFallback: {
     width: 56,
@@ -519,28 +507,28 @@ const styles = StyleSheet.create({
     borderRadius: 28,
     alignSelf: 'center',
     marginBottom: 12,
-    backgroundColor: 'rgba(255,255,255,0.06)',
+    backgroundColor: Palette.ink06,
     borderWidth: 2,
-    borderColor: 'rgba(255,255,255,0.1)',
+    borderColor: Palette.ink10,
   },
   buddyCard: {
-    backgroundColor: 'rgba(91,168,245,0.08)',
-    borderRadius: 16, borderWidth: 1, borderColor: 'rgba(91,168,245,0.2)',
+    backgroundColor: alpha(Palette.accentSoft, 0.08),
+    borderRadius: 16, borderWidth: 1, borderColor: Palette.accentSoftTint,
     padding: 16, gap: 10, marginTop: 8,
   },
   buddyLabel: {
-    fontSize: 10, fontWeight: '700' as const,
-    color: 'rgba(91,168,245,0.6)', letterSpacing: 2,
+    fontSize: 12, fontWeight: '700' as const,
+    color: alpha(Palette.accentSoft, 0.6), letterSpacing: 2,
   },
   buddyRow: { flexDirection: 'row' as const, alignItems: 'center' as const, gap: 12 },
   buddyAvatar: {
     width: 40, height: 40, borderRadius: 20,
-    borderWidth: 2, borderColor: 'rgba(91,168,245,0.3)',
+    borderWidth: 2, borderColor: alpha(Palette.accentSoft, 0.3),
   },
   buddyAvatarFallback: {
     width: 40, height: 40, borderRadius: 20,
-    backgroundColor: 'rgba(91,168,245,0.1)',
-    borderWidth: 2, borderColor: 'rgba(91,168,245,0.2)',
+    backgroundColor: alpha(Palette.accentSoft, 0.1),
+    borderWidth: 2, borderColor: Palette.accentSoftTint,
   },
-  buddyName: { fontSize: 18, fontWeight: '700' as const, color: '#ffffff' },
+  buddyName: { fontSize: 18, fontWeight: '700' as const, color: Palette.textPrimary },
 });

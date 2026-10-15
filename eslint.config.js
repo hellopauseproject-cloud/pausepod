@@ -5,6 +5,9 @@ const expoConfig = require('eslint-config-expo/flat');
 module.exports = defineConfig([
   expoConfig,
   {
-    ignores: ['dist/*'],
+    // supabase/functions körs av Deno hos Supabase, inte av Metro: den har
+    // egna globaler (Deno) och importerar över jsr:/https:. Både den här
+    // konfigurationen och tsconfig.json hoppar över mappen av samma skäl.
+    ignores: ['dist/*', 'supabase/functions/*'],
   },
 ]);

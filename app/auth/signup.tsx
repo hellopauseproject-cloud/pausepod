@@ -1,22 +1,25 @@
 import { FontAwesome } from '@expo/vector-icons';
 import { router } from 'expo-router';
-import { useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import {
   Animated,
-  Keyboard,
   KeyboardAvoidingView,
   Platform,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
-  View,
+  View
 } from 'react-native';
-import DismissKeyboardView from '../components/DismissKeyboardView';
+import { AppPalette, Radius, Spacing } from '../../constants/appTheme';
 import { useAuth } from '../../contexts/AuthContext';
+import { usePalette } from '../../contexts/ThemeContext';
 import { signInWithGoogle } from '../../lib/googleAuth';
+import DismissKeyboardView from '../components/DismissKeyboardView';
 
 export default function SignUpScreen() {
+  const Palette = usePalette();
+  const styles = useMemo(() => makeStyles(Palette), [Palette]);
   const { signUp } = useAuth();
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
@@ -43,22 +46,22 @@ export default function SignUpScreen() {
 
   const handleSignUp = async () => {
     if (!username.trim()) {
-      setError('Välj ett användarnamn.');
+      setError('Choose a username.');
       shake();
       return;
     }
     if (!email.trim()) {
-      setError('Fyll i din e-postadress.');
+      setError('Enter your email address.');
       shake();
       return;
     }
     if (password.length < 6) {
-      setError('Lösenordet måste vara minst 6 tecken.');
+      setError('Password must be at least 6 characters.');
       shake();
       return;
     }
     if (password !== confirmPassword) {
-      setError('Lösenorden matchar inte.');
+      setError('Passwords do not match.');
       shake();
       return;
     }
@@ -67,7 +70,7 @@ export default function SignUpScreen() {
     const { error: err } = await signUp(email.trim(), password, username.trim());
     setLoading(false);
     if (err) {
-      setError(err.includes('already registered') ? 'E-postadressen är redan registrerad.' : err);
+      setError(err.includes('already registered') ? 'This email address is already registered.' : err);
       shake();
     } else {
       setDone(true);
@@ -90,13 +93,13 @@ export default function SignUpScreen() {
     return (
       <View style={styles.container}>
         <View style={styles.confirmBox}>
-          <FontAwesome name="check-circle" size={48} color="#2e86de" />
-          <Text style={styles.confirmTitle}>Konto skapat!</Text>
+          <FontAwesome name="check-circle" size={48} color={Palette.accent} />
+          <Text style={styles.confirmTitle}>Account created!</Text>
           <Text style={styles.confirmText}>
-            Kolla din e-post för att bekräfta kontot och logga sedan in.
+            Check your email to confirm your account, then log in.
           </Text>
           <TouchableOpacity style={styles.button} onPress={() => router.replace('/auth/login' as never)}>
-            <Text style={styles.buttonText}>Logga in</Text>
+            <Text style={styles.buttonText}>Log in</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -111,20 +114,20 @@ export default function SignUpScreen() {
       <DismissKeyboardView>
       <View style={styles.inner}>
         <View style={styles.logoRow}>
-          <FontAwesome name="pause" size={22} color="#2e86de" />
+          <FontAwesome name="pause" size={22} color={Palette.accent} />
           <Text style={styles.logoText}>PAUSE POD</Text>
         </View>
 
         <View style={styles.header}>
-          <Text style={styles.title}>Skapa konto.</Text>
-          <Text style={styles.subtitle}>Det tar bara en minut.</Text>
+          <Text style={styles.title}>Create account.</Text>
+          <Text style={styles.subtitle}></Text>
         </View>
 
         <Animated.View style={[styles.form, { transform: [{ translateX: shakeAnim }] }]}>
           <TextInput
             style={styles.input}
-            placeholder="Användarnamn"
-            placeholderTextColor="#4a4a6a"
+            placeholder="Username"
+            placeholderTextColor={Palette.ink20}
             value={username}
             onChangeText={setUsername}
             autoCapitalize="none"
@@ -135,8 +138,8 @@ export default function SignUpScreen() {
           <TextInput
             ref={emailInputRef}
             style={styles.input}
-            placeholder="E-postadress"
-            placeholderTextColor="#4a4a6a"
+            placeholder="Email address"
+            placeholderTextColor={Palette.ink20}
             value={email}
             onChangeText={setEmail}
             autoCapitalize="none"
@@ -148,8 +151,8 @@ export default function SignUpScreen() {
           <TextInput
             ref={passwordInputRef}
             style={styles.input}
-            placeholder="Lösenord (minst 6 tecken)"
-            placeholderTextColor="#4a4a6a"
+            placeholder="Password (at least 6 characters)"
+            placeholderTextColor={Palette.ink20}
             value={password}
             onChangeText={setPassword}
             secureTextEntry
@@ -160,8 +163,8 @@ export default function SignUpScreen() {
           <TextInput
             ref={confirmPasswordInputRef}
             style={styles.input}
-            placeholder="Bekräfta lösenord"
-            placeholderTextColor="#4a4a6a"
+            placeholder="Confirm password"
+            placeholderTextColor={Palette.ink20}
             value={confirmPassword}
             onChangeText={setConfirmPassword}
             secureTextEntry
@@ -178,12 +181,12 @@ export default function SignUpScreen() {
           disabled={loading || googleLoading}
           activeOpacity={0.85}
         >
-          <Text style={styles.buttonText}>{loading ? 'Skapar konto...' : 'Skapa konto'}</Text>
+          <Text style={styles.buttonText}>{loading ? 'Creating account...' : 'Create account'}</Text>
         </TouchableOpacity>
 
         <View style={styles.dividerRow}>
           <View style={styles.dividerLine} />
-          <Text style={styles.dividerText}>eller</Text>
+          <Text style={styles.dividerText}>or</Text>
           <View style={styles.dividerLine} />
         </View>
 
@@ -195,13 +198,13 @@ export default function SignUpScreen() {
         >
           <Text style={styles.googleG}>G</Text>
           <Text style={styles.googleText}>
-            {googleLoading ? 'Ansluter...' : 'Fortsätt med Google'}
+            {googleLoading ? 'Connecting...' : 'Continue with Google'}
           </Text>
         </TouchableOpacity>
 
         <TouchableOpacity onPress={() => router.replace('/auth/login' as never)} style={styles.switchRow}>
-          <Text style={styles.switchText}>Har du redan ett konto? </Text>
-          <Text style={styles.switchLink}>Logga in</Text>
+          <Text style={styles.switchText}>Already have an account? </Text>
+          <Text style={styles.switchLink}>Log in</Text>
         </TouchableOpacity>
       </View>
       </DismissKeyboardView>
@@ -209,14 +212,14 @@ export default function SignUpScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (Palette: AppPalette) => StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0f0f1a',
+    backgroundColor: Palette.bg,
   },
   inner: {
     flex: 1,
-    paddingHorizontal: 32,
+    paddingHorizontal: Spacing.xxl,
     paddingTop: 80,
     paddingBottom: 48,
     justifyContent: 'center',
@@ -229,9 +232,9 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
   },
   logoText: {
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: 'bold',
-    color: '#2e86de',
+    color: Palette.accent,
     letterSpacing: 4,
   },
   header: {
@@ -239,50 +242,46 @@ const styles = StyleSheet.create({
   },
   title: {
     fontSize: 36,
-    fontWeight: '700',
-    color: '#ffffff',
+    fontWeight: '800',
+    color: Palette.textPrimary,
     lineHeight: 44,
     letterSpacing: 0.2,
   },
   subtitle: {
     fontSize: 16,
-    color: '#5a7fa8',
+    color: Palette.textSecondary,
     letterSpacing: 0.2,
   },
   form: {
     gap: 12,
   },
   input: {
-    backgroundColor: '#1a1a2e',
-    borderRadius: 14,
+    backgroundColor: Palette.surface,
+    borderRadius: Radius.md,
     paddingVertical: 16,
     paddingHorizontal: 20,
     fontSize: 16,
-    color: '#ffffff',
+    color: Palette.textPrimary,
     borderWidth: 1,
-    borderColor: '#1e2a3a',
+    borderColor: Palette.surfaceBorder,
   },
   errorText: {
-    color: '#e05a5a',
+    color: Palette.danger,
     fontSize: 14,
     marginTop: 4,
   },
   button: {
-    backgroundColor: '#2e86de',
-    borderRadius: 32,
+    backgroundColor: Palette.accent,
+    borderRadius: Radius.pill,
     paddingVertical: 16,
     alignItems: 'center',
-    shadowColor: '#2e86de',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.35,
-    shadowRadius: 16,
-    elevation: 8,
+    ...Palette.cardShadow,
   },
   buttonDisabled: {
     opacity: 0.6,
   },
   buttonText: {
-    color: '#ffffff',
+    color: Palette.onAccent,
     fontSize: 16,
     fontWeight: '700',
     letterSpacing: 2,
@@ -295,11 +294,11 @@ const styles = StyleSheet.create({
   dividerLine: {
     flex: 1,
     height: 1,
-    backgroundColor: '#1e2a3a',
+    backgroundColor: Palette.surfaceBorder,
   },
   dividerText: {
-    color: '#3a3a5a',
-    fontSize: 13,
+    color: Palette.textTertiary,
+    fontSize: 14,
     letterSpacing: 1,
   },
   googleButton: {
@@ -307,19 +306,19 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 12,
-    backgroundColor: '#1a1a2e',
-    borderRadius: 32,
+    backgroundColor: Palette.surface,
+    borderRadius: Radius.pill,
     paddingVertical: 15,
     borderWidth: 1,
-    borderColor: '#2a2a4a',
+    borderColor: Palette.surfaceBorder,
   },
   googleG: {
     fontSize: 16,
     fontWeight: '700',
-    color: '#8a9aba',
+    color: Palette.textSecondary,
   },
   googleText: {
-    color: '#8a9aba',
+    color: Palette.textSecondary,
     fontSize: 15,
     fontWeight: '500',
     letterSpacing: 0.5,
@@ -330,11 +329,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   switchText: {
-    color: '#4a4a6a',
+    color: Palette.textTertiary,
     fontSize: 14,
   },
   switchLink: {
-    color: '#2e86de',
+    color: Palette.accent,
     fontSize: 14,
     fontWeight: '600',
   },
@@ -347,12 +346,12 @@ const styles = StyleSheet.create({
   },
   confirmTitle: {
     fontSize: 28,
-    fontWeight: '700',
-    color: '#ffffff',
+    fontWeight: '800',
+    color: Palette.textPrimary,
   },
   confirmText: {
     fontSize: 16,
-    color: '#5a7fa8',
+    color: Palette.textSecondary,
     textAlign: 'center',
     lineHeight: 26,
   },

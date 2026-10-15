@@ -1,16 +1,62 @@
 import { FontAwesome5 } from '@expo/vector-icons';
 import { useAudioPlayer } from 'expo-audio';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
-import { Animated, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Animated, Image, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useAuth } from '../contexts/AuthContext';
-import { supabase } from '../lib/supabase';
+import { track } from '../lib/analytics';
+import { setPendingPauseTag } from '../lib/pauseTags';
+import { getSharedPausePeople, SharedPausePerson } from '../lib/pauseInvites';
+import { removeCheers, sendCheers } from '../lib/pauseCheers';
 import { getSelectedCategories } from './pauseLogger';
+import { AppPalette, Radius, Spacing } from '../constants/appTheme';
+import { RoomProvider, usePalette } from '../contexts/ThemeContext';
+import { roomShell, ScreenBackground } from '../components/screen-background';
 
+// Hur ofta listan över de andra hämtas om medan någon fortfarande pausar.
+const PEOPLE_REFRESH_MS = 15_000;
 
-export default function PauseSummaryScreen() {
+/** "Anna", "Anna and Steve", "Anna, Steve and Bo". */
+function joinNames(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? '';
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
+
+function PersonFace({ username, avatarUrl, styles }: {
+  username: string; avatarUrl: string | null; styles: ReturnType<typeof makeStyles>;
+}) {
+  if (avatarUrl?.startsWith('https://')) {
+    return <Image source={{ uri: avatarUrl }} style={styles.personFace} />;
+  }
+  return (
+    <View style={[styles.personFace, styles.personFaceFallback]}>
+      <Text style={styles.personFaceLetter}>{username[0]?.toUpperCase() ?? '?'}</Text>
+    </View>
+  );
+}
+
+/**
+ * Hör till **pause-rummet**. Rummet följer ärendet och inte filträdet — se
+ * ROOMS i [constants/appTheme.ts](../constants/appTheme.ts). Skalet är
+ * identiskt med de andra rummens: en komponent kan inte läsa sin egen
+ * provider, och en bakgrund i skalet täcker varje gren skärmen returnerar.
+ */
+export default function PauseSummaryRoom() {
+  return (
+    <RoomProvider room="pause">
+      <View style={roomShell}>
+        <ScreenBackground room="pause" />
+        <PauseSummaryScreen />
+      </View>
+    </RoomProvider>
+  );
+}
+
+function PauseSummaryScreen() {
+  const Palette = usePalette();
+  const styles = useMemo(() => makeStyles(Palette), [Palette]);
   const { user } = useAuth();
-  const { duration, category, sharedWithName, sharedSessionId } = useLocalSearchParams<{
+  const { duration, category, sharedSessionId } = useLocalSearchParams<{
     duration: string;
     category: string;
     sharedWithName: string;
@@ -20,50 +66,109 @@ export default function PauseSummaryScreen() {
   const seconds = parseInt(duration ?? '0');
   const bellPlayer = useAudioPlayer(require('../assets/images/Bell.mp3'));
 
-  useEffect(() => { bellPlayer.play(); }, []);
+  // **En ensam paus slutar på Hem**, inte här: strecken stiger med det man
+  // vann tillbaka och frågan glider upp där (se lib/pauseTags.ts, *Överlämningen*).
+  // Rutten hit sätts i app/_layout.tsx, som inte rörs, så skärmen lämnar en
+  // lapp och byter sig själv mot Hem — och klockan ringer där i stället.
+  //
+  // En delad paus stannar här, men bara om någon faktiskt var med: den som
+  // bjöd in och som ingen hängde på har pausat ensam, och det ska se ut
+  // precis så. Att ingen kom står ingenstans (lib/pauseInvites.ts). Därför
+  // avgörs det först när listan över de andra kommit — `people` null betyder
+  // "inte hämtad än", och då ritas ingenting.
+  const [people, setPeople] = useState<SharedPausePerson[] | null>(sharedSessionId ? null : []);
+  const handOff = people !== null && people.length === 0;
+  const handedOffRef = useRef(false);
+  useEffect(() => {
+    if (people === null) return;
+    if (handOff) {
+      if (handedOffRef.current) return;
+      handedOffRef.current = true;
+      setPendingPauseTag(seconds, !!category);
+      router.replace('/(tabs)');
+      return;
+    }
+    if (!handedOffRef.current) {
+      handedOffRef.current = true;
+      bellPlayer.play();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [people === null, handOff]);
+
+  // De andra i pausen. Hämtas om medan någon fortfarande pausar, så att
+  // "still pausing" blir "paused 12 min" medan skärmen står framme.
+  useEffect(() => {
+    if (!sharedSessionId) return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const load = async () => {
+      const list = await getSharedPausePeople(sharedSessionId);
+      if (!alive) return;
+      setPeople(list);
+      if (list.some(p => p.still_pausing)) timer = setTimeout(load, PEOPLE_REFRESH_MS);
+    };
+    load();
+    return () => { alive = false; if (timer) clearTimeout(timer); };
+  }, [sharedSessionId]);
 
   const [cat, setCat] = useState<{ id: string; emoji: string; label: string } | null>(null);
-  const [partnerStatus, setPartnerStatus] = useState<{ stillPausing: boolean; durationSecs: number } | null>(null);
 
-  // Greeting state
-  const [greetingText, setGreetingText]     = useState('');
-  const [showGreeting, setShowGreeting]     = useState(!!sharedWithName);
-  const [greetingSending, setGreetingSending] = useState(false);
-  const [greetingSent, setGreetingSent]     = useState(false);
-  const sentOpacity = useRef(new Animated.Value(0)).current;
+  // Hjärtat går till dem som slutat — deras paus finns som rad, och det är
+  // den hjärtat hänger på (stats.tsx visar det på mottagarens paus). Den som
+  // fortfarande pausar har ingen rad än.
+  const finished = (people ?? []).filter(p => !p.still_pausing && p.seconds != null);
+  const finishedNames = joinNames(finished.map(p => p.username));
 
-  const sendGreeting = async () => {
-    if (!greetingText.trim() || greetingSending || !user?.id || !sharedSessionId) return;
-    setGreetingSending(true);
+  // ── Ett hjärta i stället för en hälsning ──
+  // Ett tryck fyller det och skickar, ett till tömmer det igen. Fyllningen
+  // sker direkt och rullas tillbaka om skrivningen faller, så att trycket
+  // känns som ett tryck och inte som ett formulär. Se supabase/pause_cheers.sql.
+  const [cheered, setCheered] = useState(false);
+  const [cheerBusy, setCheerBusy] = useState(false);
+  const heartPop = useRef(new Animated.Value(1)).current;
+  // Vilka som faktiskt fått hjärtat. Ett tryck är ett hjärta till alla i
+  // pausen, också dem som slutar efteråt — så effekten nedan skickar till
+  // var och en som dyker upp i `finished` medan hjärtat är fyllt.
+  const cheeredIdsRef = useRef<Set<string>>(new Set());
 
-    const { data: partner } = await supabase
-      .from('pause_sessions')
-      .select('id, user_id')
-      .eq('shared_session_id', sharedSessionId)
-      .neq('user_id', user.id)
-      .limit(1)
-      .maybeSingle();
-
-    if (partner) {
-      await supabase.from('pause_messages').insert({
-        sender_id: user.id,
-        receiver_id: partner.user_id,
-        session_id: partner.id,
-        message_type: 'text',
-        text_content: greetingText.trim(),
-        delivered: false,
-      });
+  const toggleCheer = async () => {
+    if (cheerBusy || !user?.id || !sharedSessionId || finished.length === 0) return;
+    const next = !cheered;
+    setCheered(next);
+    if (next) {
+      heartPop.setValue(0.6);
+      Animated.spring(heartPop, { toValue: 1, friction: 3, tension: 160, useNativeDriver: true }).start();
     }
-
-    setGreetingSending(false);
-    setGreetingSent(true);
-    sentOpacity.setValue(0);
-    Animated.sequence([
-      Animated.timing(sentOpacity, { toValue: 1, duration: 400, useNativeDriver: true }),
-      Animated.delay(1800),
-      Animated.timing(sentOpacity, { toValue: 0, duration: 500, useNativeDriver: true }),
-    ]).start(() => setShowGreeting(false));
+    setCheerBusy(true);
+    const ids = finished.map(p => p.user_id);
+    let ok: boolean;
+    if (next) {
+      const got = await sendCheers(user.id, sharedSessionId, ids);
+      got.forEach(id => cheeredIdsRef.current.add(id));
+      ok = got.length > 0;
+    } else {
+      // Tar tillbaka från alla som fått det, också de som tillkom efteråt.
+      ok = await removeCheers(user.id, sharedSessionId, [...cheeredIdsRef.current]);
+      if (ok) cheeredIdsRef.current.clear();
+    }
+    setCheerBusy(false);
+    if (!ok) setCheered(!next);
+    else if (next) track('pause_cheer_sent', { recipients: ids.length });
   };
+
+  // Den som slutar pausa efter trycket får sitt hjärta när raden dyker upp.
+  const finishedKey = finished.map(p => p.user_id).join(',');
+  useEffect(() => {
+    if (!cheered || cheerBusy || !user?.id || !sharedSessionId) return;
+    const missing = finished.map(p => p.user_id).filter(id => !cheeredIdsRef.current.has(id));
+    if (missing.length === 0) return;
+    sendCheers(user.id, sharedSessionId, missing).then(got => {
+      got.forEach(id => cheeredIdsRef.current.add(id));
+      if (got.length > 0) track('pause_cheer_sent', { recipients: got.length, late: true });
+    });
+  // `finished` byggs om varje rendering; nyckeln är listan av id:n.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cheered, cheerBusy, finishedKey, user?.id, sharedSessionId]);
 
   useEffect(() => {
     const load = async () => {
@@ -75,32 +180,46 @@ export default function PauseSummaryScreen() {
     load();
   }, [category]);
 
-  useEffect(() => {
-    if (!sharedSessionId || !user?.id) return;
-    supabase
-      .rpc('get_partner_session_status', { p_shared_id: sharedSessionId, p_my_id: user.id })
-      .maybeSingle()
-      .then(({ data, error }) => {
-        if (error) console.error('[Summary] partner fetch error:', error.message);
-        const d = data as { ended_at: string | null; duration_seconds: number | null } | null;
-        if (d) setPartnerStatus({ stillPausing: !d.ended_at, durationSecs: d.duration_seconds ?? 0 });
-      });
-  }, [sharedSessionId, user?.id]);
-
+  // Två lager: siffran + meningen möter blicken direkt (ingen fråga, inget
+  // beslut att fatta — sessionen är redan avslutad och sparad av lådan).
+  // Kortet, kategori, hjärtat och partnerstatus ligger kvar under,
+  // nåbara genom att scrolla ner eller genom att tona in efter en sekund.
   const fadeAnim = useRef(new Animated.Value(0)).current;
+  const detailsFade = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }).start();
+    Animated.sequence([
+      Animated.delay(1000),
+      Animated.timing(detailsFade, { toValue: 1, duration: 600, useNativeDriver: true }),
+    ]).start();
   }, []);
 
   const formatTime = (secs: number) => {
-    if (secs < 60) return `${secs} sek`;
+    if (secs < 60) return `${secs} sec`;
     const h = Math.floor(secs / 3600);
     const m = Math.floor((secs % 3600) / 60);
     const s = secs % 60;
     if (h > 0) return `${h}h ${m}min`;
     if (s === 0) return `${m} min`;
-    return `${m} min ${s} sek`;
+    return `${m} min ${s} sec`;
   };
+
+  // Spellar ut i klartext ("18 minutes") bara för den stora siffran —
+  // resten av skärmen (kortet, partnerstatus) behåller appens vanliga
+  // förkortade format.
+  const formatHeroDuration = (secs: number) => {
+    if (secs < 60) return `${secs} second${secs === 1 ? '' : 's'}`;
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    if (h > 0) return `${h} hour${h === 1 ? '' : 's'} ${m} minute${m === 1 ? '' : 's'}`;
+    return `${m} minute${m === 1 ? '' : 's'}`;
+  };
+
+  // Medan bytet till Hem pågår ritas ingenting — annars blinkar den gamla
+  // sammanfattningen till under en bildruta.
+  if (handOff || people === null) return null;
+
+  const together = people.length > 0;
 
   return (
     <KeyboardAvoidingView
@@ -113,93 +232,79 @@ export default function PauseSummaryScreen() {
       showsVerticalScrollIndicator={false}
     >
 
-      <Animated.View style={{ opacity: fadeAnim, alignItems: 'center', width: '100%', gap: 20 }}>
+      <Animated.View style={{ opacity: fadeAnim, alignItems: 'center', gap: 8 }}>
+        <Text style={styles.bigNumber}>{formatHeroDuration(seconds)}</Text>
+        <Text style={styles.welcomeText}>Welcome back.</Text>
+      </Animated.View>
 
-        <Text style={styles.title}>Paus klar</Text>
+      <Animated.View style={{ opacity: detailsFade, alignItems: 'center', width: '100%', gap: 20, marginTop: 56 }}>
 
-        <View style={styles.card}>
-          <Text style={styles.cardLabel}>DU PAUSADE I</Text>
-          <Text style={styles.cardTime}>{formatTime(seconds)}</Text>
+        {(cat || together) && (
+          <View style={styles.card}>
+            {cat && (
+              <View style={styles.categoryBlock}>
+                <Text style={styles.categoryEmoji}>{cat.emoji}</Text>
+                <Text style={styles.categoryLabel}>{cat.label}</Text>
+              </View>
+            )}
 
-          <View style={styles.divider} />
+            {together && (
+              <View style={styles.sharedRow}>
+                <FontAwesome5 name="user-friends" size={13} color={Palette.accent} />
+                <Text style={styles.sharedText}>You paused together</Text>
+              </View>
+            )}
 
-          {cat && (
-            <View style={styles.categoryBlock}>
-              <Text style={styles.categoryEmoji}>{cat.emoji}</Text>
-              <Text style={styles.categoryLabel}>{cat.label}</Text>
-            </View>
-          )}
-
-          {!!sharedWithName && (
-            <View style={styles.sharedRow}>
-              <FontAwesome5 name="user-friends" size={13} color="#2e86de" />
-              <Text style={styles.sharedText}>Du pausade med {sharedWithName}</Text>
-            </View>
-          )}
-
-          {!!sharedWithName && partnerStatus && (
-            <Text style={styles.partnerStatusText}>
-              {partnerStatus.stillPausing
-                ? `${sharedWithName} pausar fortfarande.`
-                : `${sharedWithName} pausade i ${formatTime(partnerStatus.durationSecs)}.`}
-            </Text>
-          )}
-        </View>
-
-        {showGreeting && (
-          <View style={styles.greetingSection}>
-            {greetingSent ? (
-              <Animated.View style={[styles.greetingSentWrap, { opacity: sentOpacity }]}>
-                <View style={styles.greetingSentIcon}>
-                  <FontAwesome5 name="check" size={18} color="white" />
-                </View>
-                <Text style={styles.greetingSentText}>Hälsningen skickad!</Text>
-                <Text style={styles.greetingSentSub}>
-                  {sharedWithName} får den när de öppnar appen.
-                </Text>
-              </Animated.View>
-            ) : (
-              <>
-                <Text style={styles.greetingTitle}>
-                  Skicka en hälsning till {sharedWithName}?
-                </Text>
-                <View style={styles.greetingInputWrap}>
-                  <TextInput
-                    style={styles.greetingInput}
-                    value={greetingText}
-                    onChangeText={t => { if (t.length <= 200) setGreetingText(t); }}
-                    placeholder="Skriv något…"
-                    placeholderTextColor="rgba(255,255,255,0.2)"
-                    multiline
-                    maxLength={200}
-                  />
-                  <Text style={styles.greetingCount}>{200 - greetingText.length}</Text>
-                </View>
-                <View style={styles.greetingActions}>
-                  <TouchableOpacity
-                    style={[styles.greetingSendBtn, (!greetingText.trim() || greetingSending) && styles.greetingSendBtnDisabled]}
-                    onPress={sendGreeting}
-                    disabled={!greetingText.trim() || greetingSending}
-                    activeOpacity={0.85}
-                  >
-                    <Text style={styles.greetingSendTxt}>
-                      {greetingSending ? 'Skickar…' : 'Skicka'}
+            {/* En rad per person. Inget pronomen — appen vet inte vilket
+                någon använder (CLAUDE.md) — så namnet bär raden och tiden
+                står efter en punkt. */}
+            {together && (
+              <View style={styles.peopleList} accessibilityLiveRegion="polite">
+                {people.map(p => (
+                  <View key={p.user_id} style={styles.personRow}>
+                    <PersonFace username={p.username} avatarUrl={p.avatar_url} styles={styles} />
+                    <Text style={styles.personText}>
+                      <Text style={styles.personName}>{p.username}</Text>
+                      {p.is_host ? ' invited you' : ' joined in'}
+                      {p.still_pausing
+                        ? ' · still pausing'
+                        : p.seconds != null ? ` · paused ${formatTime(p.seconds)}` : ''}
                     </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity onPress={() => setShowGreeting(false)} activeOpacity={0.6}>
-                    <Text style={styles.greetingSkipTxt}>Inte den här gången</Text>
-                  </TouchableOpacity>
-                </View>
-              </>
+                  </View>
+                ))}
+              </View>
+            )}
+
+            {/* Hjärtat hör till raderna ovanför, så det står i samma kort —
+                en rad, inte en egen sektion. Hela raden är knappen. */}
+            {together && finished.length > 0 && (
+              <TouchableOpacity
+                style={styles.cheerRow}
+                onPress={toggleCheer}
+                activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityState={{ selected: cheered }}
+                accessibilityLabel={cheered ? `Take back your cheer for ${finishedNames}` : `Send a cheer to ${finishedNames}`}
+              >
+                <Animated.View style={[styles.cheerHeart, cheered && styles.cheerHeartOn, { transform: [{ scale: heartPop }] }]}>
+                  <FontAwesome5 name="heart" size={14} solid={cheered} color={cheered ? Palette.onAccent : Palette.dangerSoft} />
+                </Animated.View>
+                <Text style={styles.cheerText}>
+                  {cheered ? `You cheered ${finishedNames}` : `Send a cheer to ${finishedNames}`}
+                </Text>
+              </TouchableOpacity>
             )}
           </View>
         )}
 
         <TouchableOpacity
           style={styles.doneButton}
-          onPress={() => router.replace('/(tabs)')}
+          // Frågan *What did you do instead?* ställs på Hem, som efter en
+          // ensam paus — klockan har redan ringt här (lib/pauseTags.ts).
+          onPress={() => { setPendingPauseTag(seconds, !!category, false); router.replace('/(tabs)'); }}
+          activeOpacity={0.85}
         >
-          <Text style={styles.doneText}>Tillbaka till start</Text>
+          <Text style={styles.doneText}>Back to start</Text>
         </TouchableOpacity>
 
       </Animated.View>
@@ -208,52 +313,36 @@ export default function PauseSummaryScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (Palette: AppPalette) => StyleSheet.create({
   container: {
     flexGrow: 1,
-    backgroundColor: '#0f0f1a',
+    backgroundColor: 'transparent',
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 32,
+    padding: Spacing.xxl,
     gap: 16,
     paddingBottom: 48,
   },
-  title: {
-    fontSize: 38,
-    fontWeight: 'bold',
-    color: 'white',
+  bigNumber: {
+    fontSize: 56,
+    fontWeight: '900',
+    color: Palette.textPrimary,
     letterSpacing: 1,
   },
+  welcomeText: {
+    fontSize: 18,
+    color: Palette.textSecondary,
+  },
   card: {
-    backgroundColor: '#1a1a2e',
-    borderRadius: 28,
-    padding: 32,
+    backgroundColor: Palette.surface,
+    borderRadius: Radius.xl,
+    padding: Spacing.xxl,
     alignItems: 'center',
     width: '100%',
     borderWidth: 1,
-     borderColor: '#27ae60',
-         shadowColor: '#27ae60',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 12,
+    borderColor: Palette.accentBorder,
     gap: 16,
-  },
-  cardLabel: {
-    fontSize: 11,
-    color: '#555',
-    fontWeight: 'bold',
-    letterSpacing: 3,
-  },
-  cardTime: {
-    fontSize: 60,
-    fontWeight: 'bold',
-    color: 'white',
-    letterSpacing: 2,
-  },
-  divider: {
-    width: '50%',
-    height: 1,
-    backgroundColor: 'rgba(255,255,255,0.07)',
+    ...Palette.cardShadow,
   },
   categoryBlock: {
     alignItems: 'center',
@@ -264,43 +353,22 @@ const styles = StyleSheet.create({
     fontSize: 36,
   },
   categoryLabel: {
-    color: '#27ae60',
-    fontSize: 13,
+    color: Palette.accent,
+    fontSize: 14,
     fontWeight: 'bold',
     letterSpacing: 2,
   },
   message: {
     fontSize: 17,
-    color: '#7ab8f5',
+    color: Palette.accentPale,
     textAlign: 'center',
     lineHeight: 28,
     fontStyle: 'italic',
     paddingHorizontal: 8,
   },
-  doneButton: {
-    backgroundColor: '#27ae60',
-    paddingVertical: 16,
-    paddingHorizontal: 48,
-    borderRadius: 32,
-    width: '100%',
-    alignItems: 'center',
-    shadowColor: '#27ae60',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.35,
-    shadowRadius: 14,
-    elevation: 8,
-    marginTop: 8,
-  },
-  doneText: {
-    color: 'white',
-    fontSize: 18,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-  },
-
   partnerStatusText: {
-    fontSize: 13,
-    color: 'rgba(255,255,255,0.35)',
+    fontSize: 14,
+    color: Palette.textTertiary,
     textAlign: 'center',
     fontStyle: 'italic',
     letterSpacing: 0.2,
@@ -312,109 +380,75 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingVertical: 8,
     paddingHorizontal: 16,
-    backgroundColor: 'rgba(46,134,222,0.1)',
-    borderRadius: 20,
+    backgroundColor: Palette.accentTint,
+    borderRadius: Radius.pill,
     borderWidth: 1,
-    borderColor: 'rgba(46,134,222,0.25)',
+    borderColor: Palette.accentBorder,
   },
   sharedText: {
-    color: '#7ab8f5',
-    fontSize: 13,
+    color: Palette.accentPale,
+    fontSize: 14,
     fontWeight: '600',
   },
 
-  // Greeting sent confirmation
-  greetingSentWrap: {
+  // De andra i pausen, en rad per person.
+  peopleList: { alignSelf: 'stretch', gap: 12 },
+  personRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  personFace: { width: 32, height: 32, borderRadius: 16 },
+  personFaceFallback: {
+    backgroundColor: Palette.surfaceAlt, alignItems: 'center', justifyContent: 'center',
+  },
+  personFaceLetter: { color: Palette.textSecondary, fontSize: 14, fontWeight: '700' },
+  personText: { flex: 1, fontSize: 15, lineHeight: 21, color: Palette.textSecondary },
+  personName: { color: Palette.textPrimary, fontWeight: '700' },
+
+  // Hjärtat. Hjärtats rosa (`dangerSoft`) är den enda kulören ett hjärta
+  // läses som; fyllt får det en fylld cirkel med vitt hjärta, samma språk som
+  // appens fyllda knappar.
+  // En rad i kortet, avdelad från personerna med ett hårstreck. Hjärtat är
+  // lika stort som ansiktena ovanför (32), så raden läses som en av dem.
+  cheerRow: {
+    alignSelf: 'stretch',
+    flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    paddingVertical: 12,
+    paddingTop: 14,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: Palette.ink10,
   },
-  greetingSentIcon: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    backgroundColor: '#27ae60',
+  cheerHeart: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: '#27ae60',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4,
-    shadowRadius: 10,
-    elevation: 6,
+    borderWidth: 1.5,
+    borderColor: Palette.dangerSoft,
   },
-  greetingSentSub: {
-    color: 'rgba(255,255,255,0.35)',
-    fontSize: 13,
-    textAlign: 'center',
-    lineHeight: 19,
+  cheerHeartOn: {
+    backgroundColor: Palette.dangerSoft,
+  },
+  cheerText: {
+    flex: 1,
+    color: Palette.textSecondary,
+    fontSize: 14,
+    lineHeight: 20,
   },
 
-  // Greeting section
-  greetingSection: {
+  doneButton: {
+    backgroundColor: Palette.accent,
+    paddingVertical: 16,
+    paddingHorizontal: 48,
+    borderRadius: Radius.pill,
     width: '100%',
-    backgroundColor: 'rgba(255,255,255,0.04)',
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
-    padding: 20,
-    gap: 16,
-  },
-  greetingSentText: {
-    color: '#ffffff',
-    fontSize: 17,
-    fontWeight: '600',
-    textAlign: 'center',
-    letterSpacing: 0.2,
-  },
-  greetingTitle: {
-    color: 'rgba(255,255,255,0.6)',
-    fontSize: 14,
-    letterSpacing: 0.2,
-    lineHeight: 22,
-  },
-  greetingInputWrap: {
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
-    padding: 14,
-    gap: 8,
-  },
-  greetingInput: {
-    color: '#ffffff',
-    fontSize: 15,
-    lineHeight: 22,
-    minHeight: 60,
-  },
-  greetingCount: {
-    color: 'rgba(255,255,255,0.2)',
-    fontSize: 11,
-    textAlign: 'right',
-    letterSpacing: 0.5,
-  },
-  greetingActions: {
     alignItems: 'center',
-    gap: 12,
+    marginTop: 8,
+    ...Palette.cardShadow,
   },
-  greetingSendBtn: {
-    backgroundColor: '#2e86de',
-    paddingVertical: 12,
-    alignSelf: 'stretch',
-    alignItems: 'center',
-    borderRadius: 24,
-  },
-  greetingSendBtnDisabled: {
-    backgroundColor: 'rgba(46,134,222,0.25)',
-  },
-  greetingSendTxt: {
-    color: 'white',
-    fontSize: 14,
-    fontWeight: '600',
-    letterSpacing: 0.3,
-  },
-  greetingSkipTxt: {
-    color: 'rgba(255,255,255,0.3)',
-    fontSize: 13,
-    letterSpacing: 0.2,
+  doneText: {
+    color: Palette.onAccent,
+    fontSize: 18,
+    fontWeight: 'bold',
+    letterSpacing: 1,
   },
 });

@@ -1,30 +1,70 @@
 import { Entypo, FontAwesome, FontAwesome5 } from '@expo/vector-icons';
 import * as FileSystem from 'expo-file-system/legacy';
-import * as Notifications from 'expo-notifications';
 import { router, useNavigation } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Keyboard, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { AppPalette, Radius, Spacing, alpha, darkPalette, lightPalette } from '../constants/appTheme';
+import { RoomProvider, ThemePreference, usePalette, useTheme } from '../contexts/ThemeContext';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { roomShell, ScreenBackground } from '../components/screen-background';
+import { track } from '../lib/analytics';
 import DismissKeyboardView from './components/DismissKeyboardView';
-import { Category, DEFAULT_CATEGORIES, logNotificationSettingsChange, saveSelectedCategories } from './pauseLogger';
-import { getProfile } from './userProfile';
+import { Category, DEFAULT_CATEGORIES, saveSelectedCategories } from './pauseLogger';
 
-const STORAGE_PATH = FileSystem.documentDirectory + 'selectedBlocks.json';
+type ThemeOption = {
+  value: ThemePreference;
+  label: string;
+  /** Vänster (eller enda) halva av förhandsrutan. */
+  left: typeof darkPalette;
+  /** Satt bara för 'system', som visar båda lägena i samma ruta. */
+  right?: typeof darkPalette;
+};
+
+const THEME_OPTIONS: ThemeOption[] = [
+  { value: 'light', label: 'Light', left: lightPalette },
+  { value: 'dark', label: 'Dark', left: darkPalette },
+  { value: 'system', label: 'System', left: lightPalette, right: darkPalette },
+];
+
 const CATEGORIES_PATH = FileSystem.documentDirectory + 'selectedCategories.json';
 const CUSTOM_CATEGORIES_PATH = FileSystem.documentDirectory + 'customCategories.json';
 
-const TIME_BLOCKS = [
-  { id: 'morning', label: '🌅 Morgon', time: '07:00-09:00', hour: 7 },
-  { id: 'forenoon', label: '☕ Förmiddag', time: '09:00-12:00', hour: 9 },
-  { id: 'lunch', label: '🌞 Lunch', time: '12:00-14:00', hour: 12 },
-  { id: 'afternoon', label: '🌤 Eftermiddag', time: '14:00-17:00', hour: 14 },
-  { id: 'early_evening', label: '🌆 Tidig kväll', time: '17:00-19:00', hour: 17 },
-  { id: 'evening', label: '🌙 Kväll', time: '19:00-21:00', hour: 19 },
-  { id: 'late_evening', label: '🌚 Sen kväll', time: '21:00-23:00', hour: 21 },
-  { id: 'night', label: '🌑 Natt', time: '00:00-07:00', hour: 2 },
-];
+function ThemeSwatchHalf({ palette }: { palette: typeof darkPalette }) {
+  const Palette = usePalette();
+  const styles = useMemo(() => makeStyles(Palette), [Palette]);
+  return (
+    <View style={[styles.themeSwatchHalf, { backgroundColor: palette.bg }]}>
+      <View style={[styles.themeSwatchDot, { backgroundColor: palette.accent }]} />
+      <View style={[styles.themeSwatchLine, { backgroundColor: palette.ink30 }]} />
+      <View style={[styles.themeSwatchLine, { backgroundColor: palette.ink15, width: '60%' }]} />
+    </View>
+  );
+}
 
-export default function SettingsScreen() {
-  const [selectedBlocks, setSelectedBlocks] = useState<string[]>([]);
+/**
+ * Hör till **study-rummet** — Pause-rummet en trappa djupare in. Se ROOMS i
+ * [constants/appTheme.ts](../constants/appTheme.ts) för varför de tre
+ * skärmarna bakom Hems topbar-ikoner delar ett eget, mörkare rum.
+ */
+export default function SettingsRoom() {
+  return (
+    <RoomProvider room="study">
+      <View style={roomShell}>
+        <ScreenBackground room="study" />
+        <SettingsScreen />
+      </View>
+    </RoomProvider>
+  );
+}
+
+function SettingsScreen() {
+  const Palette = usePalette();
+  const styles = useMemo(() => makeStyles(Palette), [Palette]);
+  const insets = useSafeAreaInsets();
+  // Utseendet sparas direkt när man trycker och har ingenting med
+  // Spara-knappen längst ned att göra — den hör till kategorierna, och ett
+  // val man ser slå igenom på en gång vill ingen behöva bekräfta.
+  const { preference, setPreference } = useTheme();
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
   const [customCategories, setCustomCategories] = useState<Category[]>([]);
   const [newEmoji, setNewEmoji] = useState('');
@@ -34,17 +74,10 @@ export default function SettingsScreen() {
   const [unsavedAction, setUnsavedAction] = useState<any>(null);
   const navigation = useNavigation();
 
-  const originalBlocks = useRef<string[]>([]);
   const originalCategories = useRef<string[]>([]);
 
   useEffect(() => {
     const load = async () => {
-      try {
-        const blocks = await FileSystem.readAsStringAsync(STORAGE_PATH);
-        const parsed = JSON.parse(blocks);
-        setSelectedBlocks(parsed);
-        originalBlocks.current = parsed;
-      } catch (e) {}
       try {
         const cats = await FileSystem.readAsStringAsync(CATEGORIES_PATH);
         const parsed = JSON.parse(cats);
@@ -58,14 +91,6 @@ export default function SettingsScreen() {
     };
     load();
   }, []);
-
-  const toggleBlock = (id: string) => {
-    setSelectedBlocks(prev => {
-      const next = prev.includes(id) ? prev.filter(b => b !== id) : [...prev, id];
-      setHasChanges(true);
-      return next;
-    });
-  };
 
   const toggleCategory = (id: string) => {
     setSelectedCategories(prev => {
@@ -102,51 +127,17 @@ export default function SettingsScreen() {
   const allCategories = [...DEFAULT_CATEGORIES, ...customCategories];
 
   const handleSave = async () => {
-    await FileSystem.writeAsStringAsync(STORAGE_PATH, JSON.stringify(selectedBlocks));
     await saveSelectedCategories(
       allCategories.filter(c => selectedCategories.includes(c.id)).map(c => c.id)
     );
 
-    let callerName = 'Dig själv';
-    try {
-      const profile = await getProfile();
-      if (profile.name) callerName = profile.name;
-    } catch {}
-
-    await Notifications.cancelAllScheduledNotificationsAsync();
-    const blocks = TIME_BLOCKS.filter(b => selectedBlocks.includes(b.id));
-    for (let day = 0; day < 14; day++) {
-      for (const block of blocks) {
-        const randomMinute = Math.floor(Math.random() * 60);
-        const date = new Date();
-        date.setDate(date.getDate() + day);
-        date.setHours(block.hour, randomMinute, 0, 0);
-        if (date > new Date()) {
-          await Notifications.scheduleNotificationAsync({
-            content: {
-              title: callerName,
-              body: 'Inkommande samtal',
-              sound: 'ringtone.wav',
-              data: { screen: 'call' },
-            },
-            trigger: {
-              type: Notifications.SchedulableTriggerInputTypes.DATE,
-              date,
-              channelId: 'incoming-call',
-            },
-          });
-        }
-      }
-    }
-
-    await logNotificationSettingsChange({
-      timesPerDay: blocks.length,
-      timeSlots: blocks.map(b => ({ id: b.id, label: b.label, time: b.time })),
-    });
+    // Antalet, inte vilka. Vilka kategorier som används syns redan i
+    // analytics.category_mix, och där betyder de något — en vald kategori som
+    // ingen pausar i är bara en kryssruta.
+    track('categories_saved', { count: selectedCategories.length, custom: customCategories.length });
 
     setSaved(true);
     setHasChanges(false);
-    originalBlocks.current = selectedBlocks;
     originalCategories.current = selectedCategories;
     setTimeout(() => setSaved(false), 2500);
   };
@@ -186,44 +177,52 @@ export default function SettingsScreen() {
     <DismissKeyboardView>
 
       {/* Topbar */}
-      <View style={styles.topBar}>
+      <View style={[styles.topBar, { paddingTop: Math.max(40, insets.top + 8) }]}>
         <TouchableOpacity style={styles.backButton} onPress={handleBack}>
-          <FontAwesome name="chevron-left" size={16} color="#2e86de" />
-          <Text style={styles.backText}>Tillbaka</Text>
+          <FontAwesome name="chevron-left" size={16} color={Palette.accent} />
+          <Text style={styles.backText}>Back</Text>
         </TouchableOpacity>
       </View>
 
-      <Text style={styles.pageTitle}>Inställningar</Text>
+      <Text style={styles.pageTitle}>Settings</Text>
 
-      {/* TIDSBLOCK */}
+      {/* APPEARANCE */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>När scrollar du mest?</Text>
+        <Text style={styles.sectionTitle}>Appearance</Text>
         <Text style={styles.sectionSubtitle}>
-          Välj minst 2 tidsblock — påminnelserna anpassas efter dig.
+          Change theme.
         </Text>
-        <View style={styles.blocks}>
-          {TIME_BLOCKS.map(block => (
-            <TouchableOpacity
-              key={block.id}
-              style={[styles.block, selectedBlocks.includes(block.id) && styles.blockSelected]}
-              onPress={() => toggleBlock(block.id)}
-            >
-              <Text style={[styles.blockLabel, selectedBlocks.includes(block.id) && styles.blockLabelSelected]}>
-                {block.label}
-              </Text>
-              <Text style={[styles.blockTime, selectedBlocks.includes(block.id) && styles.blockTimeSelected]}>
-                {block.time}
-              </Text>
-            </TouchableOpacity>
-          ))}
+        <View style={styles.themeRow}>
+          {THEME_OPTIONS.map(opt => {
+            const on = preference === opt.value;
+            return (
+              <TouchableOpacity
+                key={opt.value}
+                style={[styles.themeOption, on && styles.themeOptionOn]}
+                onPress={() => setPreference(opt.value)}
+                activeOpacity={0.85}
+                accessibilityRole="radio"
+                accessibilityState={{ selected: on }}
+              >
+                <View style={styles.themeSwatch}>
+                  <ThemeSwatchHalf palette={opt.left} />
+                  {opt.right && <ThemeSwatchHalf palette={opt.right} />}
+                </View>
+                <Text style={[styles.themeLabel, on && styles.themeLabelOn]}>{opt.label}</Text>
+              </TouchableOpacity>
+            );
+          })}
         </View>
+        {preference === 'system' && (
+          <Text style={styles.themeHint}>Follows your phone&apos;s light and dark setting.</Text>
+        )}
       </View>
 
-      {/* KATEGORIER */}
+      {/* CATEGORIES */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Vad gör du under pausen?</Text>
+        <Text style={styles.sectionTitle}>What do you do during your pause?</Text>
         <Text style={styles.sectionSubtitle}>
-          Välj de aktiviteter som passar dig.
+          Choose the activities that suit you.
         </Text>
         <View style={styles.categoryGrid}>
           {allCategories.map(cat => (
@@ -241,22 +240,22 @@ export default function SettingsScreen() {
                   onPress={() => removeCustomCategory(cat.id)}
                   hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                 >
-                  <FontAwesome5 name="times" size={10} color="#555" />
+                  <FontAwesome5 name="times" size={10} color={Palette.textFaint} />
                 </TouchableOpacity>
               )}
             </TouchableOpacity>
           ))}
         </View>
 
-        {/* Lägg till egen kategori */}
+        {/* Add custom category */}
         <View style={styles.addSection}>
-          <Text style={styles.addTitle}>LÄGG TILL EGEN AKTIVITET:</Text>
+          <Text style={styles.addTitle}>ADD YOUR OWN ACTIVITY:</Text>
           <View style={styles.addRow}>
             <View style={styles.emojiWrapper}>
               <TextInput
                 style={styles.emojiInput}
                 placeholder=""
-                placeholderTextColor="#444"
+                placeholderTextColor={Palette.textDisabled}
                 value={newEmoji}
                 onChangeText={setNewEmoji}
                 maxLength={2}
@@ -264,13 +263,13 @@ export default function SettingsScreen() {
                 onSubmitEditing={() => Keyboard.dismiss()}
               />
               {!newEmoji && (
-                <Entypo name="emoji-happy" size={22} color="#444" style={styles.emojiOverlay} />
+                <Entypo name="emoji-happy" size={22} color={Palette.textDisabled} style={styles.emojiOverlay} />
               )}
             </View>
             <TextInput
               style={styles.labelInput}
-              placeholder="Namn på aktiviteten"
-              placeholderTextColor="#444"
+              placeholder="Activity name"
+              placeholderTextColor={Palette.textDisabled}
               value={newLabel}
               onChangeText={setNewLabel}
               autoCapitalize="words"
@@ -283,36 +282,35 @@ export default function SettingsScreen() {
               onPress={addCustomCategory}
               disabled={!newEmoji.trim() || !newLabel.trim()}
             >
-              <FontAwesome5 name="plus" size={16} color="white" />
+              <FontAwesome5 name="plus" size={16} color={Palette.onAccent} />
             </TouchableOpacity>
           </View>
         </View>
       </View>
 
-      {/* Spara-knapp */}
+      {/* Save button */}
       <TouchableOpacity
-        style={[styles.saveButton, selectedBlocks.length < 2 && styles.saveButtonDisabled, saved && styles.saveButtonDone]}
+        style={[styles.saveButton, saved && styles.saveButtonDone]}
         onPress={handleSave}
-        disabled={selectedBlocks.length < 2}
       >
         <Text style={styles.saveText}>
-          {saved ? 'Sparat!' : selectedBlocks.length < 2 ? 'Välj minst 2 tidsblock' : 'Spara'}
+          {saved ? 'Saved!' : 'Save'}
         </Text>
       </TouchableOpacity>
 
       <Modal visible={!!unsavedAction} transparent animationType="fade" onRequestClose={() => setUnsavedAction(null)}>
         <View style={styles.unsavedOverlay}>
           <View style={styles.unsavedSheet}>
-            <Text style={styles.unsavedTitle}>Osparade ändringar</Text>
-            <Text style={styles.unsavedBody}>Vill du spara dina ändringar innan du lämnar?</Text>
+            <Text style={styles.unsavedTitle}>Unsaved changes</Text>
+            <Text style={styles.unsavedBody}>Do you want to save your changes before leaving?</Text>
             <TouchableOpacity style={styles.unsavedBtnSave} onPress={handleUnsavedSave}>
-              <Text style={styles.unsavedBtnSaveText}>Spara</Text>
+              <Text style={styles.unsavedBtnSaveText}>Save</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.unsavedBtnDiscard} onPress={handleUnsavedDiscard}>
-              <Text style={styles.unsavedBtnDiscardText}>Lämna utan att spara</Text>
+              <Text style={styles.unsavedBtnDiscardText}>Leave without saving</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.unsavedBtnCancel} onPress={() => setUnsavedAction(null)}>
-              <Text style={styles.unsavedBtnCancelText}>Avbryt</Text>
+              <Text style={styles.unsavedBtnCancelText}>Cancel</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -324,11 +322,12 @@ export default function SettingsScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (Palette: AppPalette) => StyleSheet.create({
   container: {
     flexGrow: 1,
-    backgroundColor: '#1a1a2e',
-    padding: 24,
+    // Botten ritas av <ScreenBackground> i skalet ovan.
+    backgroundColor: 'transparent',
+    padding: Spacing.xl,
     paddingTop: 0,
     paddingBottom: 70,
 
@@ -346,61 +345,95 @@ const styles = StyleSheet.create({
     paddingRight: 16,
   },
   backText: {
-    color: '#2e86de',
+    color: Palette.accent,
     fontSize: 16,
   },
   pageTitle: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: 'white',
+    fontSize: 32,
+    fontWeight: '800',
+    color: Palette.textPrimary,
     marginBottom: 32,
   },
   section: {
+    backgroundColor: Palette.surface,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Palette.surfaceBorder,
+    padding: Spacing.lg,
     marginBottom: 40,
   },
   sectionTitle: {
     fontSize: 20,
     fontWeight: 'bold',
-    color: 'white',
+    color: Palette.textPrimary,
     marginBottom: 6,
   },
   sectionSubtitle: {
     fontSize: 14,
-    color: '#aaa',
+    color: Palette.textSecondary,
     marginBottom: 16,
     lineHeight: 22,
   },
-  blocks: {
+  themeRow: {
+    flexDirection: 'row',
     gap: 10,
   },
-  block: {
-    backgroundColor: '#2a2a3e',
-    borderRadius: 16,
-    padding: 16,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+  themeOption: {
+    flex: 1,
     alignItems: 'center',
-    borderWidth: 2,
-    borderColor: 'transparent',
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 6,
+    borderRadius: Radius.md,
+    borderWidth: 1.5,
+    borderColor: Palette.surfaceAlt,
+    backgroundColor: Palette.surfaceAlt,
   },
-  blockSelected: {
-    borderColor: '#2e86de',
-    backgroundColor: '#1a3a5e',
+  themeOptionOn: {
+    borderColor: Palette.hue,
+    backgroundColor: Palette.hueTint,
   },
-  blockLabel: {
-    fontSize: 14,
-    color: '#aaa',
-    fontWeight: 'bold',
+  // Rutan är en miniatyr av läget den erbjuder: botten, en blå prick och två
+  // textrader. 'System' lägger två halvor kant i kant i samma ruta.
+  themeSwatch: {
+    flexDirection: 'row',
+    width: 58,
+    height: 42,
+    borderRadius: 8,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: Palette.surfaceBorder,
   },
-  blockLabelSelected: {
-    color: 'white',
+  themeSwatchHalf: {
+    flex: 1,
+    padding: 5,
+    gap: 3,
   },
-  blockTime: {
-    fontSize: 11,
-    color: '#555',
+  themeSwatchDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    marginBottom: 2,
   },
-  blockTimeSelected: {
-    color: '#7ab8f5',
+  themeSwatchLine: {
+    height: 3,
+    borderRadius: 2,
+    width: '85%',
+  },
+  themeLabel: {
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 0.4,
+    color: Palette.textSecondary,
+  },
+  themeLabelOn: {
+    color: Palette.accent,
+  },
+  themeHint: {
+    fontSize: 13,
+    color: Palette.textTertiary,
+    marginTop: 12,
+    lineHeight: 19,
   },
   categoryGrid: {
     flexDirection: 'row',
@@ -411,42 +444,39 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    backgroundColor: '#2a2a3e',
+    backgroundColor: Palette.surfaceAlt,
     borderWidth: 1.5,
-    borderColor: '#2a2a3e',
-    borderRadius: 32,
+    borderColor: Palette.surfaceAlt,
+    borderRadius: Radius.pill,
     paddingVertical: 7,
     paddingHorizontal: 10,
   },
   chipSelected: {
-    borderColor: '#2e86de',
-    backgroundColor: '#1a3a5e',
+    borderColor: Palette.hue,
+    backgroundColor: Palette.hueTint,
   },
   chipEmoji: {
     fontSize: 14,
   },
   chipLabel: {
-    color: '#aaa',
-    fontSize: 11,
+    color: Palette.textSecondary,
+    fontSize: 12,
     fontWeight: 'bold',
     letterSpacing: 0.5,
   },
   chipLabelSelected: {
-    color: 'white',
+    color: Palette.textPrimary,
   },
   addSection: {
     marginTop: 20,
-    backgroundColor: '#2a2a3e',
-    borderRadius: 20,
+    backgroundColor: Palette.surfaceAlt,
+    borderRadius: Radius.xl,
     padding: 16,
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: Palette.surfaceBorder,
   },
   addTitle: {
-    color: '#555',
-    fontSize: 11,
-    fontWeight: 'bold',
-    letterSpacing: 2,
+    ...Palette.eyebrow,
     marginBottom: 12,
   },
   addRow: {
@@ -465,109 +495,105 @@ const styles = StyleSheet.create({
     position: 'absolute',
     width: 52,
     height: 48,
-    backgroundColor: '#1a1a2e',
-    borderRadius: 12,
+    backgroundColor: Palette.bg,
+    borderRadius: Radius.sm,
     fontSize: 22,
-    color: 'white',
+    color: Palette.textPrimary,
     textAlign: 'center',
     borderWidth: 1.5,
-    borderColor: '#333',
+    borderColor: Palette.surfaceBorder,
   },
   emojiOverlay: {
     pointerEvents: 'none',
   },
   labelInput: {
     flex: 1,
-    backgroundColor: '#1a1a2e',
-    borderRadius: 12,
+    backgroundColor: Palette.bg,
+    borderRadius: Radius.sm,
     padding: 12,
     fontSize: 14,
-    color: 'white',
+    color: Palette.textPrimary,
     borderWidth: 1.5,
-    borderColor: '#333',
+    borderColor: Palette.surfaceBorder,
     fontWeight: 'bold',
     letterSpacing: 1,
   },
   addButton: {
-    backgroundColor: '#2e86de',
+    backgroundColor: Palette.accent,
     width: 44,
     height: 44,
-    borderRadius: 22,
+    borderRadius: Radius.pill,
     alignItems: 'center',
     justifyContent: 'center',
   },
   addButtonDisabled: {
-    backgroundColor: '#333',
+    backgroundColor: Palette.surfaceAlt,
   },
   saveButton: {
-    backgroundColor: '#2e86de',
+    backgroundColor: Palette.accent,
     paddingVertical: 16,
-    borderRadius: 32,
+    borderRadius: Radius.pill,
     alignItems: 'center',
     marginTop: 0,
   },
-  saveButtonDisabled: {
-    backgroundColor: '#2a2a3e',
-
-  },
   saveButtonDone: {
-    backgroundColor: '#27ae60',
+    backgroundColor: Palette.success,
 
   },
   saveText: {
-    color: 'white',
+    color: Palette.onAccent,
     fontSize: 18,
     fontWeight: 'bold',
   },
   unsavedOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
+    backgroundColor: Palette.scrim,
     justifyContent: 'center',
     alignItems: 'center',
     padding: 32,
   },
   unsavedSheet: {
-    backgroundColor: '#1e1e30',
-    borderRadius: 24,
+    backgroundColor: Palette.modalSurface,
+    borderRadius: Radius.xl,
     padding: 28,
     width: '100%',
     gap: 12,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.07)',
+    borderColor: Palette.modalBorder,
   },
   unsavedTitle: {
-    color: '#ffffff',
+    color: Palette.textPrimary,
     fontSize: 18,
     fontWeight: '700',
     textAlign: 'center',
     marginBottom: 2,
   },
   unsavedBody: {
-    color: 'rgba(255,255,255,0.5)',
+    color: Palette.textSecondary,
     fontSize: 14,
     textAlign: 'center',
     lineHeight: 20,
     marginBottom: 8,
   },
   unsavedBtnSave: {
-    backgroundColor: '#2e86de',
-    borderRadius: 16,
+    backgroundColor: Palette.accent,
+    borderRadius: Radius.md,
     paddingVertical: 14,
     alignItems: 'center',
   },
   unsavedBtnSaveText: {
-    color: '#fff',
+    color: Palette.onAccent,
     fontSize: 15,
     fontWeight: '700',
   },
   unsavedBtnDiscard: {
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    borderRadius: 16,
+    backgroundColor: Palette.ink05,
+    borderRadius: Radius.md,
     paddingVertical: 14,
     alignItems: 'center',
   },
   unsavedBtnDiscardText: {
-    color: 'rgba(255,80,80,0.85)',
+    color: alpha(Palette.dangerSoft, 0.85),
     fontSize: 15,
     fontWeight: '500',
   },
@@ -576,7 +602,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   unsavedBtnCancelText: {
-    color: 'rgba(255,255,255,0.3)',
+    color: Palette.textTertiary,
     fontSize: 14,
   },
 });

@@ -11,6 +11,7 @@
 
 import * as FileSystem from 'expo-file-system/legacy';
 import { supabase } from './supabase';
+import { recordPauseInCircle } from './circles';
 
 const OUTBOX_PATH = FileSystem.documentDirectory + 'sessionOutbox.json';
 
@@ -22,7 +23,7 @@ export interface OutboxRecord {
   completed: boolean;
   withPod: boolean;
   category?: string;
-  /** ISO — när appen tog emot session_ended (används som ended_at vid synk) */
+  /** ISO — faktisk sluttid, Date.now() - ageMs vid mottagandet (används som ended_at vid synk) */
   recordedAt: string;
   syncedAt?: string;
 }
@@ -42,13 +43,11 @@ async function writeOutbox(records: OutboxRecord[]): Promise<void> {
   } catch {}
 }
 
-export async function enqueueSession(
-  record: Omit<OutboxRecord, 'recordedAt'>
-): Promise<{ ok: true }> {
+export async function enqueueSession(record: OutboxRecord): Promise<{ ok: true }> {
   const records = await readOutbox();
   const exists = records.some(r => r.boxId === record.boxId && r.seq === record.seq);
   if (!exists) {
-    records.push({ ...record, recordedAt: new Date().toISOString() });
+    records.push(record);
     await writeOutbox(records);
   }
   return { ok: true };
@@ -67,7 +66,7 @@ export async function flushOutbox(): Promise<void> {
   let changed = false;
   for (const rec of pending) {
     const endedAt = new Date(rec.recordedAt);
-    const { error } = await supabase.from('pause_sessions').insert({
+    const { data: inserted, error } = await supabase.from('pause_sessions').insert({
       user_id: rec.userId,
       started_at: new Date(endedAt.getTime() - rec.durationMs).toISOString(),
       ended_at: endedAt.toISOString(),
@@ -78,11 +77,17 @@ export async function flushOutbox(): Promise<void> {
       completed: rec.completed,
       box_id: rec.boxId,
       box_seq: rec.seq,
-    });
+    }).select('id').single();
 
     if (!error || isDuplicateKeyError(error)) {
       rec.syncedAt = new Date().toISOString();
       changed = true;
+      // Bara den insert som faktiskt skapade raden räknar in pausen i
+      // cirkeln — vid 23505 finns den redan, och RPC:n dedupar ändå på
+      // session_id server-side.
+      if (!error && inserted && rec.completed) {
+        recordPauseInCircle(inserted.id, rec.category);
+      }
     } else {
       console.log('sessionOutbox: insert misslyckades, försöker igen senare:', JSON.stringify(error));
     }

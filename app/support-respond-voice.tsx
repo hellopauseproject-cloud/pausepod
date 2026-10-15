@@ -1,45 +1,51 @@
 import { FontAwesome5 } from '@expo/vector-icons';
-import { RecordingPresets, getRecordingPermissionsAsync, requestRecordingPermissionsAsync, useAudioPlayer, useAudioPlayerStatus, useAudioRecorder } from 'expo-audio';
+import { RecordingPresets, getRecordingPermissionsAsync, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus, useAudioRecorder } from 'expo-audio';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator, Animated, Linking, StyleSheet,
   Text, TouchableOpacity, View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '../contexts/AuthContext';
+import { track } from '../lib/analytics';
 import { supabase } from '../lib/supabase';
-
-const SUPABASE_URL = 'https://iwyumzgewiwvcbuqzjnk.supabase.co';
-const BUCKET = 'support-media';
-
-async function uploadViaXhr(localUri: string, storagePath: string, mimeType: string): Promise<string> {
-  const { data: { session } } = await supabase.auth.getSession();
-  const token = session?.access_token;
-  if (!token) throw new Error('Inte inloggad');
-
-  await new Promise<void>((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${SUPABASE_URL}/storage/v1/object/${BUCKET}/${storagePath}`);
-    xhr.setRequestHeader('Authorization', `Bearer ${token}`);
-    xhr.setRequestHeader('x-upsert', 'true');
-    xhr.onreadystatechange = () => {
-      if (xhr.readyState !== 4) return;
-      if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else reject(new Error(`HTTP ${xhr.status}: ${xhr.responseText}`));
-    };
-    xhr.onerror = () => reject(new Error('Nätverksfel'));
-    const form = new FormData();
-    form.append('', { uri: localUri, type: mimeType, name: storagePath.split('/').pop() ?? 'file' } as any);
-    xhr.send(form);
-  });
-
-  return `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${storagePath}`;
-}
+import { uploadSupportMedia } from '../lib/supportMedia';
+import { AppPalette, alpha } from '../constants/appTheme';
+import { RoomProvider, usePalette } from '../contexts/ThemeContext';
+import { roomShell, ScreenBackground } from '../components/screen-background';
 
 type Phase = 'idle' | 'recording' | 'reviewing' | 'uploading' | 'sent';
 
-export default function SupportRespondVoiceScreen() {
+// iOS vägrar spela in om ljudsessionen inte är satt till det först: recorder.record()
+// kastar RecordingDisabledException, och felet nämner inte att det är appens eget
+// audio-läge som saknas. Android bryr sig inte, men anropet är ofarligt där.
+// Läget måste också tillbaka efteråt — med allowsRecording kvar står iOS i
+// PlayAndRecord, och uppspelningen av det inspelade går ut genom hörluren i
+// stället för högtalaren, alltså nästan ohörbart.
+const RECORDING_AUDIO_MODE = { allowsRecording: true, playsInSilentMode: true } as const;
+const PLAYBACK_AUDIO_MODE = { allowsRecording: false, playsInSilentMode: true } as const;
+
+/**
+ * Hör till **friends-rummet**. Rummet följer ärendet och inte filträdet — se
+ * ROOMS i [constants/appTheme.ts](../constants/appTheme.ts). Skalet är
+ * identiskt med de andra rummens: en komponent kan inte läsa sin egen
+ * provider, och en bakgrund i skalet täcker varje gren skärmen returnerar.
+ */
+export default function SupportRespondVoiceRoom() {
+  return (
+    <RoomProvider room="friends">
+      <View style={roomShell}>
+        <ScreenBackground room="friends" />
+        <SupportRespondVoiceScreen />
+      </View>
+    </RoomProvider>
+  );
+}
+
+function SupportRespondVoiceScreen() {
+  const Palette = usePalette();
+  const st = useMemo(() => makeSt(Palette), [Palette]);
   const { user } = useAuth();
   const { storyId, ownerName } = useLocalSearchParams<{ storyId: string; ownerName: string }>();
   const insets = useSafeAreaInsets();
@@ -62,6 +68,9 @@ export default function SupportRespondVoiceScreen() {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       try { player.pause(); } catch {}
+      // Lämna inte sessionen i inspelningsläge efter oss: nästa skärm som spelar
+      // upp något (ringsignalen i call.tsx) skulle då få den i hörluren.
+      setAudioModeAsync(PLAYBACK_AUDIO_MODE).catch(() => {});
     };
   }, []);
 
@@ -84,6 +93,7 @@ export default function SupportRespondVoiceScreen() {
     } catch { /* fortsätt ändå, låt prepareToRecordAsync kasta om det behövs */ }
 
     try {
+      await setAudioModeAsync(RECORDING_AUDIO_MODE);
       await recorder.prepareToRecordAsync();
       recorder.record();
       setPhase('recording');
@@ -104,7 +114,8 @@ export default function SupportRespondVoiceScreen() {
       ]));
       pulseLoop.current.start();
     } catch (e: any) {
-      setErrorMsg('Kunde inte starta inspelning: ' + (e?.message ?? 'okänt fel'));
+      await setAudioModeAsync(PLAYBACK_AUDIO_MODE).catch(() => {});
+      setErrorMsg('Could not start recording: ' + (e?.message ?? 'unknown error'));
     }
   };
 
@@ -114,16 +125,18 @@ export default function SupportRespondVoiceScreen() {
     pulseAnim.setValue(1);
     try {
       await recorder.stop();
+      await setAudioModeAsync(PLAYBACK_AUDIO_MODE).catch(() => {});
       const uri = recorder.uri;
       if (uri) {
         setRecordedUri(uri);
         setPhase('reviewing');
       } else {
-        setErrorMsg('Inspelningen misslyckades — ingen fil skapades.');
+        setErrorMsg('Recording failed — no file was created.');
         setPhase('idle');
       }
     } catch (e: any) {
-      setErrorMsg('Stoppa-fel: ' + (e?.message ?? 'okänt fel'));
+      await setAudioModeAsync(PLAYBACK_AUDIO_MODE).catch(() => {});
+      setErrorMsg('Stop error: ' + (e?.message ?? 'unknown error'));
       setPhase('idle');
     }
   };
@@ -135,7 +148,7 @@ export default function SupportRespondVoiceScreen() {
 
     try {
       const path = `${user.id}/${Date.now()}.m4a`;
-      const contentUrl = await uploadViaXhr(recordedUri, path, 'audio/m4a');
+      const contentUrl = await uploadSupportMedia(recordedUri, path, 'audio/m4a');
 
       const { error: dbError } = await supabase.from('support_responses').insert({
         story_id: storyId,
@@ -145,10 +158,11 @@ export default function SupportRespondVoiceScreen() {
       });
       if (dbError) throw dbError;
 
+      track('support_response_sent', { response_type: 'voice' });
       setPhase('sent');
       setTimeout(() => router.back(), 900);
     } catch (e: any) {
-      setErrorMsg('Uppladdningsfel: ' + (e?.message ?? JSON.stringify(e)));
+      setErrorMsg('Upload error: ' + (e?.message ?? JSON.stringify(e)));
       setPhase('reviewing');
     }
   };
@@ -173,18 +187,18 @@ export default function SupportRespondVoiceScreen() {
       <View style={[st.container, { paddingBottom: insets.bottom + 24 }]}>
         <View style={st.header}>
           <TouchableOpacity onPress={() => router.back()} style={st.closeBtn} activeOpacity={0.7}>
-            <FontAwesome5 name="chevron-left" size={15} color="#2e86de" />
+            <FontAwesome5 name="chevron-left" size={15} color={Palette.accent} />
           </TouchableOpacity>
-          <Text style={st.title}>Röstpepp till {ownerName}</Text>
+          <Text style={st.title}>Support for {ownerName}</Text>
           <View style={{ width: 40 }} />
         </View>
         <View style={st.mainArea}>
-          <FontAwesome5 name="microphone-slash" size={40} color="rgba(162,155,254,0.4)" />
+          <FontAwesome5 name="microphone-slash" size={40} color={alpha(Palette.community, 0.4)} />
           <Text style={st.permText}>
-            Mikrofonåtkomst nekades.{'\n'}Aktivera i Inställningar → Appar → Integritet.
+            Microphone access was denied.{'\n'}Enable it in Settings → Apps → Privacy.
           </Text>
           <TouchableOpacity style={st.sendBtn} onPress={() => Linking.openSettings()} activeOpacity={0.85}>
-            <Text style={st.sendBtnText}>Öppna inställningar</Text>
+            <Text style={st.sendBtnText}>Open settings</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -195,21 +209,21 @@ export default function SupportRespondVoiceScreen() {
     <View style={[st.container, { paddingBottom: insets.bottom + 24 }]}>
       <View style={st.header}>
         <TouchableOpacity onPress={() => router.back()} style={st.closeBtn} activeOpacity={0.7}>
-          <FontAwesome5 name="chevron-left" size={15} color="#2e86de" />
+          <FontAwesome5 name="chevron-left" size={15} color={Palette.accent} />
         </TouchableOpacity>
-        <Text style={st.title}>Röstpepp till {ownerName}</Text>
+        <Text style={st.title}>Support for {ownerName}</Text>
         <View style={{ width: 40 }} />
       </View>
 
-      <Text style={st.subtitle}>Max 60 sekunder.</Text>
+      <Text style={st.subtitle}>Max 60 seconds.</Text>
 
       <View style={st.mainArea}>
         {phase === 'idle' && (
           <>
             <TouchableOpacity style={st.recordBtn} onPress={startRecording} activeOpacity={0.85}>
-              <FontAwesome5 name="microphone" size={36} color="#fff" />
+              <FontAwesome5 name="microphone" size={36} color={Palette.onAccent} />
             </TouchableOpacity>
-            <Text style={st.hintText}>Tryck för att börja spela in</Text>
+            <Text style={st.hintText}>Tap to start recording</Text>
           </>
         )}
 
@@ -217,11 +231,11 @@ export default function SupportRespondVoiceScreen() {
           <>
             <Animated.View style={[st.recordingRing, { transform: [{ scale: pulseAnim }] }]}>
               <TouchableOpacity style={st.recordBtn} onPress={stopRecording} activeOpacity={0.85}>
-                <FontAwesome5 name="stop" size={28} color="#fff" />
+                <FontAwesome5 name="stop" size={28} color={Palette.onAccent} />
               </TouchableOpacity>
             </Animated.View>
             <Text style={st.durationText}>{fmtDur(duration)}</Text>
-            <Text style={st.hintText}>Tryck för att stoppa</Text>
+            <Text style={st.hintText}>Tap to stop</Text>
           </>
         )}
 
@@ -230,17 +244,17 @@ export default function SupportRespondVoiceScreen() {
             <Text style={st.durationText}>{fmtDur(duration)}</Text>
             <View style={st.reviewBtns}>
               <TouchableOpacity style={st.playBtn} onPress={togglePlay} activeOpacity={0.85}>
-                <FontAwesome5 name={playerStatus.playing ? 'pause' : 'play'} size={22} color="#fff" />
+                <FontAwesome5 name={playerStatus.playing ? 'pause' : 'play'} size={22} color={Palette.onAccent} />
               </TouchableOpacity>
             </View>
             <View style={st.reviewActions}>
               <TouchableOpacity style={st.reRecordBtn} onPress={handleReRecord} activeOpacity={0.75}>
-                <FontAwesome5 name="redo" size={13} color="rgba(255,255,255,0.5)" />
-                <Text style={st.reRecordText}>Spela in igen</Text>
+                <FontAwesome5 name="redo" size={13} color={Palette.ink50} />
+                <Text style={st.reRecordText}>Record again</Text>
               </TouchableOpacity>
               <TouchableOpacity style={st.sendBtn} onPress={handleSend} activeOpacity={0.85}>
-                <FontAwesome5 name="paper-plane" size={13} color="#fff" />
-                <Text style={st.sendBtnText}>Skicka</Text>
+                <FontAwesome5 name="paper-plane" size={13} color={Palette.onAccent} />
+                <Text style={st.sendBtnText}>Send</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -248,17 +262,17 @@ export default function SupportRespondVoiceScreen() {
 
         {phase === 'uploading' && (
           <>
-            <ActivityIndicator color="#a29bfe" size="large" />
-            <Text style={st.hintText}>Laddar upp…</Text>
+            <ActivityIndicator color={Palette.community} size="large" />
+            <Text style={st.hintText}>Uploading…</Text>
           </>
         )}
 
         {phase === 'sent' && (
           <>
             <View style={st.sentIcon}>
-              <FontAwesome5 name="check" size={28} color="#fff" />
+              <FontAwesome5 name="check" size={28} color={Palette.onAccent} />
             </View>
-            <Text style={st.hintText}>Skickat!</Text>
+            <Text style={st.hintText}>Sent!</Text>
           </>
         )}
       </View>
@@ -272,58 +286,58 @@ export default function SupportRespondVoiceScreen() {
   );
 }
 
-const st = StyleSheet.create({
+const makeSt = (Palette: AppPalette) => StyleSheet.create({
   container: {
-    flex: 1, backgroundColor: '#0f0f1a',
+    flex: 1, backgroundColor: 'transparent',
     paddingHorizontal: 24, paddingTop: 60, gap: 8,
   },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
   closeBtn: { width: 44, height: 44, justifyContent: 'center' },
-  title: { fontSize: 17, fontWeight: '700', color: '#ffffff', letterSpacing: 0.2 },
-  subtitle: { fontSize: 13, color: 'rgba(255,255,255,0.3)', textAlign: 'center', marginBottom: 12 },
+  title: { fontSize: 17, fontWeight: '700', color: Palette.textPrimary, letterSpacing: 0.2 },
+  subtitle: { fontSize: 14, color: Palette.textTertiary, textAlign: 'center', marginBottom: 12 },
   mainArea: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 24 },
-  permText: { fontSize: 15, color: 'rgba(255,255,255,0.6)', textAlign: 'center', lineHeight: 24 },
+  permText: { fontSize: 15, color: Palette.textSecondary, textAlign: 'center', lineHeight: 24 },
   recordBtn: {
     width: 100, height: 100, borderRadius: 50,
-    backgroundColor: '#a29bfe', alignItems: 'center', justifyContent: 'center',
-    shadowColor: '#a29bfe', shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.4, shadowRadius: 16, elevation: 8,
+    backgroundColor: Palette.community, alignItems: 'center', justifyContent: 'center',
+    shadowColor: Palette.community, shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.4, shadowRadius: 16, elevation: 8,
   },
   recordingRing: {
     width: 130, height: 130, borderRadius: 65,
-    backgroundColor: 'rgba(162,155,254,0.15)',
+    backgroundColor: Palette.communityTint,
     alignItems: 'center', justifyContent: 'center',
-    borderWidth: 2, borderColor: 'rgba(162,155,254,0.3)',
+    borderWidth: 2, borderColor: alpha(Palette.community, 0.3),
   },
-  durationText: { fontSize: 48, fontWeight: '800', color: '#ffffff', letterSpacing: -1 },
-  hintText: { fontSize: 14, color: 'rgba(255,255,255,0.35)', textAlign: 'center' },
+  durationText: { fontSize: 48, fontWeight: '800', color: Palette.textPrimary, letterSpacing: -1 },
+  hintText: { fontSize: 14, color: Palette.ink35, textAlign: 'center' },
   reviewArea: { alignItems: 'center', gap: 24, width: '100%' },
   reviewBtns: { flexDirection: 'row', gap: 16 },
   playBtn: {
     width: 72, height: 72, borderRadius: 36,
-    backgroundColor: 'rgba(162,155,254,0.2)', borderWidth: 1.5, borderColor: '#a29bfe',
+    backgroundColor: alpha(Palette.community, 0.2), borderWidth: 1.5, borderColor: Palette.community,
     alignItems: 'center', justifyContent: 'center',
   },
   reviewActions: { flexDirection: 'row', gap: 16, width: '100%' },
   reRecordBtn: {
     flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
     paddingVertical: 14, borderRadius: 28,
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
-    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderWidth: 1, borderColor: Palette.ink10,
+    backgroundColor: Palette.ink04,
   },
-  reRecordText: { color: 'rgba(255,255,255,0.5)', fontSize: 14, fontWeight: '600' },
+  reRecordText: { color: Palette.ink50, fontSize: 14, fontWeight: '600' },
   sendBtn: {
     flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
-    paddingVertical: 14, borderRadius: 28, backgroundColor: '#a29bfe',
+    paddingVertical: 14, borderRadius: 28, backgroundColor: Palette.community,
   },
-  sendBtnText: { color: '#fff', fontSize: 14, fontWeight: '700' },
+  sendBtnText: { color: Palette.onAccent, fontSize: 14, fontWeight: '700' },
   sentIcon: {
     width: 80, height: 80, borderRadius: 40,
-    backgroundColor: '#27ae60', alignItems: 'center', justifyContent: 'center',
+    backgroundColor: Palette.success, alignItems: 'center', justifyContent: 'center',
   },
   errorBox: {
-    backgroundColor: 'rgba(231,76,60,0.12)', borderRadius: 12,
-    borderWidth: 1, borderColor: 'rgba(231,76,60,0.3)',
+    backgroundColor: alpha(Palette.danger, 0.12), borderRadius: 12,
+    borderWidth: 1, borderColor: alpha(Palette.danger, 0.3),
     padding: 12, marginBottom: 8,
   },
-  errorText: { color: '#e74c3c', fontSize: 13, textAlign: 'center', lineHeight: 18 },
+  errorText: { color: Palette.danger, fontSize: 14, textAlign: 'center', lineHeight: 19 },
 });

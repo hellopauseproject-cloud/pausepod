@@ -1,6 +1,6 @@
 import { FontAwesome } from '@expo/vector-icons';
 import { router } from 'expo-router';
-import { useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import {
   Animated,
   Keyboard,
@@ -15,15 +15,18 @@ import {
 import DismissKeyboardView from '../components/DismissKeyboardView';
 import { useAuth } from '../../contexts/AuthContext';
 import { signInWithGoogle } from '../../lib/googleAuth';
+import { AppPalette, Radius, Spacing } from '../../constants/appTheme';
+import { usePalette } from '../../contexts/ThemeContext';
 
 export default function LoginScreen() {
-  const { signIn, signUp } = useAuth();
+  const Palette = usePalette();
+  const styles = useMemo(() => makeStyles(Palette), [Palette]);
+  const { signIn } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
-  const [guestLoading, setGuestLoading] = useState(false);
 
   const shakeAnim = useRef(new Animated.Value(0)).current;
   const passwordInputRef = useRef<TextInput>(null);
@@ -39,7 +42,7 @@ export default function LoginScreen() {
 
   const handleLogin = async () => {
     if (!email.trim() || !password) {
-      setError('Fyll i e-post och lösenord.');
+      setError('Enter your email and password.');
       shake();
       return;
     }
@@ -48,7 +51,7 @@ export default function LoginScreen() {
     const { error: err } = await signIn(email.trim(), password);
     setLoading(false);
     if (err) {
-      setError('Fel e-post eller lösenord.');
+      setError('Incorrect email or password.');
       shake();
     } else {
       router.replace('/(tabs)' as never);
@@ -67,25 +70,6 @@ export default function LoginScreen() {
     // Vid framgång hanteras navigation av auth-gate i _layout.tsx
   };
 
-  const handleContinueAsGuest = async () => {
-    setGuestLoading(true);
-    setError('');
-    const randomId = Math.random().toString(36).slice(2, 10);
-    const guestEmail = `testare-${randomId}@pauseapp-test.se`;
-    const guestPassword = `${Math.random().toString(36).slice(2, 12)}Aa1!`;
-    const guestUsername = `Testare${randomId.slice(0, 5)}`;
-    const { error: err, needsConfirmation } = await signUp(guestEmail, guestPassword, guestUsername);
-    setGuestLoading(false);
-    if (err) {
-      setError('Kunde inte skapa testkonto: ' + err);
-      shake();
-    } else if (needsConfirmation) {
-      setError('E-postbekräftelse krävs just nu i Supabase-inställningarna, så testkonton kan inte logga in direkt.');
-      shake();
-    }
-    // Vid framgång hanteras navigation av auth-gate i _layout.tsx
-  };
-
   return (
     <KeyboardAvoidingView
       style={styles.container}
@@ -94,20 +78,20 @@ export default function LoginScreen() {
       <DismissKeyboardView>
       <View style={styles.inner}>
         <View style={styles.logoRow}>
-          <FontAwesome name="pause" size={22} color="#2e86de" />
+          <FontAwesome name="pause" size={22} color={Palette.accent} />
           <Text style={styles.logoText}>PAUSE POD</Text>
         </View>
 
         <View style={styles.header}>
-          <Text style={styles.title}>{'\n'}Välkommen.</Text>
-          <Text style={styles.subtitle}>Logga in för att fortsätta.</Text>
+          <Text style={styles.title}>{'\n'}Welcome.</Text>
+          <Text style={styles.subtitle}>Log in to continue.</Text>
         </View>
 
         <Animated.View style={[styles.form, { transform: [{ translateX: shakeAnim }] }]}>
           <TextInput
             style={styles.input}
-            placeholder="E-postadress"
-            placeholderTextColor="#4a4a6a"
+            placeholder="Email address"
+            placeholderTextColor={Palette.ink20}
             value={email}
             onChangeText={setEmail}
             autoCapitalize="none"
@@ -119,8 +103,8 @@ export default function LoginScreen() {
           <TextInput
             ref={passwordInputRef}
             style={styles.input}
-            placeholder="Lösenord"
-            placeholderTextColor="#4a4a6a"
+            placeholder="Password"
+            placeholderTextColor={Palette.ink20}
             value={password}
             onChangeText={setPassword}
             secureTextEntry
@@ -137,12 +121,12 @@ export default function LoginScreen() {
           disabled={loading || googleLoading}
           activeOpacity={0.85}
         >
-          <Text style={styles.buttonText}>{loading ? 'Loggar in...' : 'Logga in'}</Text>
+          <Text style={styles.buttonText}>{loading ? 'Logging in...' : 'Log in'}</Text>
         </TouchableOpacity>
 
         <View style={styles.dividerRow}>
           <View style={styles.dividerLine} />
-          <Text style={styles.dividerText}>eller</Text>
+          <Text style={styles.dividerText}>or</Text>
           <View style={styles.dividerLine} />
         </View>
 
@@ -154,24 +138,13 @@ export default function LoginScreen() {
         >
           <Text style={styles.googleG}>G</Text>
           <Text style={styles.googleText}>
-            {googleLoading ? 'Ansluter...' : 'Fortsätt med Google'}
+            {googleLoading ? 'Connecting...' : 'Continue with Google'}
           </Text>
         </TouchableOpacity>
 
         <TouchableOpacity onPress={() => router.push('/auth/signup' as never)} style={styles.switchRow}>
-          <Text style={styles.switchText}>Inget konto? </Text>
-          <Text style={styles.switchLink}>Skapa ett</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          onPress={handleContinueAsGuest}
-          style={[styles.guestButton, guestLoading && styles.buttonDisabled]}
-          disabled={loading || googleLoading || guestLoading}
-          activeOpacity={0.85}
-        >
-          <Text style={styles.guestButtonText}>
-            {guestLoading ? 'Skapar testkonto...' : 'Fortsätt utan att logga in'}
-          </Text>
+          <Text style={styles.switchText}>No account? </Text>
+          <Text style={styles.switchLink}>Create one</Text>
         </TouchableOpacity>
       </View>
       </DismissKeyboardView>
@@ -179,14 +152,14 @@ export default function LoginScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (Palette: AppPalette) => StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0f0f1a',
+    backgroundColor: Palette.bg,
   },
   inner: {
     flex: 1,
-    paddingHorizontal: 32,
+    paddingHorizontal: Spacing.xxl,
     paddingTop: 80,
     paddingBottom: 48,
     justifyContent: 'center',
@@ -199,9 +172,9 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
   },
   logoText: {
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: 'bold',
-    color: '#2e86de',
+    color: Palette.accent,
     letterSpacing: 4,
   },
   header: {
@@ -209,50 +182,46 @@ const styles = StyleSheet.create({
   },
   title: {
     fontSize: 36,
-    fontWeight: '700',
-    color: '#ffffff',
+    fontWeight: '800',
+    color: Palette.textPrimary,
     lineHeight: 44,
     letterSpacing: 0.2,
   },
   subtitle: {
     fontSize: 16,
-    color: '#5a7fa8',
+    color: Palette.textSecondary,
     letterSpacing: 0.2,
   },
   form: {
     gap: 12,
   },
   input: {
-    backgroundColor: '#1a1a2e',
-    borderRadius: 14,
+    backgroundColor: Palette.surface,
+    borderRadius: Radius.md,
     paddingVertical: 16,
     paddingHorizontal: 20,
     fontSize: 16,
-    color: '#ffffff',
+    color: Palette.textPrimary,
     borderWidth: 1,
-    borderColor: '#1e2a3a',
+    borderColor: Palette.surfaceBorder,
   },
   errorText: {
-    color: '#e05a5a',
+    color: Palette.danger,
     fontSize: 14,
     marginTop: 4,
   },
   button: {
-    backgroundColor: '#2e86de',
-    borderRadius: 32,
+    backgroundColor: Palette.accent,
+    borderRadius: Radius.pill,
     paddingVertical: 16,
     alignItems: 'center',
-    shadowColor: '#2e86de',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.35,
-    shadowRadius: 16,
-    elevation: 8,
+    ...Palette.cardShadow,
   },
   buttonDisabled: {
     opacity: 0.6,
   },
   buttonText: {
-    color: '#ffffff',
+    color: Palette.onAccent,
     fontSize: 16,
     fontWeight: '700',
     letterSpacing: 2,
@@ -265,11 +234,11 @@ const styles = StyleSheet.create({
   dividerLine: {
     flex: 1,
     height: 1,
-    backgroundColor: '#1e2a3a',
+    backgroundColor: Palette.surfaceBorder,
   },
   dividerText: {
-    color: '#3a3a5a',
-    fontSize: 13,
+    color: Palette.textTertiary,
+    fontSize: 14,
     letterSpacing: 1,
   },
   googleButton: {
@@ -277,20 +246,20 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 12,
-    backgroundColor: '#1a1a2e',
-    borderRadius: 32,
+    backgroundColor: Palette.surface,
+    borderRadius: Radius.pill,
     paddingVertical: 15,
     borderWidth: 1,
-    borderColor: '#2a2a4a',
+    borderColor: Palette.surfaceBorder,
   },
   googleG: {
     fontSize: 16,
     fontWeight: '700',
-    color: '#8a9aba',
+    color: Palette.textSecondary,
     letterSpacing: 0,
   },
   googleText: {
-    color: '#8a9aba',
+    color: Palette.textSecondary,
     fontSize: 15,
     fontWeight: '500',
     letterSpacing: 0.5,
@@ -301,27 +270,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   switchText: {
-    color: '#4a4a6a',
+    color: Palette.textTertiary,
     fontSize: 14,
   },
   switchLink: {
-    color: '#2e86de',
+    color: Palette.accent,
     fontSize: 14,
     fontWeight: '600',
-  },
-  guestButton: {
-    alignSelf: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 22,
-    borderRadius: 24,
-    borderWidth: 1,
-    borderColor: '#2a2a4a',
-    marginTop: 4,
-  },
-  guestButtonText: {
-    color: '#8a9aba',
-    fontSize: 14,
-    fontWeight: '600',
-    letterSpacing: 0.3,
   },
 });

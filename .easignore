@@ -1,0 +1,62 @@
+# EAS ersätter .gitignore helt med den här filen när den finns — därför är
+# hela .gitignore-innehållet kopierat hit nedan. Ändrar du .gitignore,
+# spegla ändringen här, annars börjar t.ex. node_modules laddas upp igen.
+
+# ── Verktygsmappar som inte hör hemma i ett bygge ──────────────────────────
+# .claude/skills/* är junctions in i .agents/skills/*. EAS packar upp
+# arbetskatalogen i en shallow-clone och försöker återskapa länken, vilket
+# ger "EPERM: operation not permitted, symlink" på Windows utan Developer
+# Mode. Ingen av dem behövs av bygget — uteslut dem helt.
+.agents/
+.claude/
+.mcp.json
+skills-lock.json
+
+# Källmaterial som aldrig bundlas
+docs/
+firmware/
+supabase/
+
+# ── Speglat ur .gitignore ──────────────────────────────────────────────────
+
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+*.pem
+
+# local env files
+.env*.local
+
+# typescript
+*.tsbuildinfo
+
+app-example
+
+# generated native folders
+/ios
+/android

@@ -1,17 +1,21 @@
 import { FontAwesome } from '@expo/vector-icons';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import * as FileSystem from 'expo-file-system/legacy';
 import { router } from 'expo-router';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { setAudioModeAsync, useAudioPlayer } from 'expo-audio';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { openPauseStart } from '../lib/pauseFlow';
 import { supabase } from '../lib/supabase';
 import { clearPending, getPending } from '../lib/supportQueue';
+import { AppPalette, Radius } from '../constants/appTheme';
+import { usePalette } from '../contexts/ThemeContext';
 
 export default function VideoScreen() {
+  const Palette = usePalette();
+  const styles = useMemo(() => makeStyles(Palette), [Palette]);
   const insets = useSafeAreaInsets();
   const [permission, requestPermission] = useCameraPermissions();
   const [showPauseLink, setShowPauseLink] = useState(false);
@@ -43,21 +47,7 @@ export default function VideoScreen() {
         return;
       }
 
-      // Existing behaviour: play from local file
-      try {
-        const savedFiles = await FileSystem.readAsStringAsync(
-          FileSystem.documentDirectory + 'selectedFiles.json'
-        );
-        const { video } = JSON.parse(savedFiles);
-        if (video) {
-          setVideoUri(video);
-        } else {
-          setNoFile(true);
-        }
-      } catch (e) {
-        setNoFile(true);
-      }
-
+      setNoFile(true);
       setVideoReady(true);
 
       await setAudioModeAsync({
@@ -136,7 +126,7 @@ export default function VideoScreen() {
       interruptionMode: 'doNotMix',
       shouldRouteThroughEarpiece: false,
     });
-    router.push('/pause');
+    openPauseStart('push');
   };
 
   if (!permission) return <View />;
@@ -144,9 +134,9 @@ export default function VideoScreen() {
   if (!permission.granted) {
     return (
       <View style={styles.container}>
-        <Text style={{ color: 'white', marginBottom: 20 }}>Appen behöver tillgång till kameran</Text>
+        <Text style={{ color: 'white', marginBottom: 20 }}>The app needs access to the camera</Text>
         <TouchableOpacity style={styles.permissionButton} onPress={requestPermission}>
-          <Text style={{ color: 'white' }}>Tillåt kamera</Text>
+          <Text style={{ color: 'white' }}>Allow camera</Text>
         </TouchableOpacity>
       </View>
     );
@@ -157,7 +147,7 @@ export default function VideoScreen() {
       {/* Video area fills remaining space above controls */}
       {noFile ? (
         <View style={styles.noFilePlaceholder}>
-          <Text style={styles.noFileText}>Ingen videofil uppladdad</Text>
+          <Text style={styles.noFileText}>No message to play</Text>
         </View>
       ) : (
         <View style={styles.videoWrapper}>
@@ -188,7 +178,7 @@ export default function VideoScreen() {
 
       {!!callerName && (
         <View style={styles.callerOverlay}>
-          <Text style={styles.callerOverlayText}>Pepp från {callerName}</Text>
+          <Text style={styles.callerOverlayText}>Support from {callerName}</Text>
         </View>
       )}
 
@@ -198,7 +188,7 @@ export default function VideoScreen() {
           <Animated.View style={{ opacity: fadeAnim }}>
             <TouchableOpacity style={styles.pauseBtn} onPress={handlePauseLink} activeOpacity={0.85}>
               <FontAwesome name="pause" size={16} color="white" />
-              <Text style={styles.pauseBtnText}>TA EN PAUS</Text>
+              <Text style={styles.pauseBtnText}>TAKE A PAUSE</Text>
             </TouchableOpacity>
           </Animated.View>
         )}
@@ -210,7 +200,12 @@ export default function VideoScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+// Den här skärmen byter aldrig läge. Bakgrunden är kamerabilden, inte en yta
+// appen målar, och allt som ligger ovanpå den (svart botten bakom, vit
+// chrome framför) måste stå kvar mot en bild vi inte känner färgen på. Ett
+// ljust tema hade gett vit text på video. Därför är literalerna här med flit
+// literaler — det är inte färger som glömdes bort i temaomläggningen.
+const makeStyles = (Palette: AppPalette) => StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#000',
@@ -239,7 +234,7 @@ const styles = StyleSheet.create({
     paddingTop: 20,
   },
   noFileText: {
-    color: '#aaa',
+    color: Palette.textSecondary,
     fontSize: 16,
   },
   cameraContainer: {
@@ -266,23 +261,19 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: 'rgba(0,0,0,0.6)',
+    backgroundColor: Palette.scrim,
     alignItems: 'center',
     justifyContent: 'center',
   },
   pauseBtn: {
-    backgroundColor: '#2e86de',
+    backgroundColor: Palette.accent,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
     paddingVertical: 14,
     paddingHorizontal: 28,
-    borderRadius: 40,
-    shadowColor: '#2e86de',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.4,
-    shadowRadius: 16,
-    elevation: 10,
+    borderRadius: Radius.pill,
+    ...Palette.cardShadow,
   },
   pauseBtnText: {
     color: 'white',
@@ -291,7 +282,7 @@ const styles = StyleSheet.create({
     letterSpacing: 3,
   },
   hangUpButton: {
-    backgroundColor: '#e74c3c',
+    backgroundColor: Palette.danger,
     width: 72,
     height: 72,
     borderRadius: 36,
@@ -300,10 +291,10 @@ const styles = StyleSheet.create({
   },
   permissionButton: {
     marginTop: 20,
-    backgroundColor: '#2e86de',
+    backgroundColor: Palette.accent,
     paddingVertical: 16,
     paddingHorizontal: 32,
-    borderRadius: 16,
+    borderRadius: Radius.md,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -311,15 +302,15 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: 60,
     alignSelf: 'center',
-    backgroundColor: 'rgba(0,0,0,0.55)',
+    backgroundColor: Palette.scrim,
     paddingHorizontal: 14,
     paddingVertical: 6,
     borderRadius: 20,
     zIndex: 10,
   },
   callerOverlayText: {
-    color: '#c4b5fd',
-    fontSize: 13,
+    color: Palette.communitySoft,
+    fontSize: 14,
     fontWeight: '600',
     letterSpacing: 0.3,
   },

@@ -1,18 +1,40 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as FileSystem from 'expo-file-system/legacy';
+import { readDoc, writeDoc } from '../lib/docStore';
 
-const LOG_PATH = FileSystem.documentDirectory + 'pauseLogs.json';
-const CATEGORIES_PATH = FileSystem.documentDirectory + 'selectedCategories.json';
+const LOG_PATH = 'pauseLogs.json';
+const CATEGORIES_PATH = 'selectedCategories.json';
 
 const SESSION_CHECKPOINT_KEY = 'active_pause_session_checkpoint';
 
 export interface SessionCheckpoint {
   startedAt: string;
+  /** ISO — senaste gången appen bevisligen levde under pausen. Skrivs om med
+   *  jämna mellanrum och en sista gång när appen lämnar förgrunden. Vid en
+   *  tvångsstängning finns ingen kod kvar att köra, så det här är det enda
+   *  vi vet om när pausen faktiskt tog slut. */
+  lastAliveAt: string;
+  /** Räknad pauslängd vid pulsslaget, i ms. Lagras i stället för att räknas
+   *  ut ur tidsstämplarna vid återställning: klockan kan ha stått frusen
+   *  (telefonen uppåtvänd) delar av tiden, och den tiden är inte paus. */
+  elapsedMs: number;
   userId: string;
   category?: string;
-  pauseType: 'session' | 'regulate';
+  pauseType: 'session' | 'regulate' | 'sleep';
   targetSeconds?: number;
   sharedSessionId?: string;
+  /** Värd (bjöd in) eller gäst (hängde på). Avgör om återställningen stänger
+   *  inbjudningarna eller markerar den egna som slutförd
+   *  (lib/pauseInvites.ts). */
+  sharedRole?: 'host' | 'guest';
+  // ── Bara en natt (pauseType 'sleep') ──
+  /** ISO — första gången telefonen lades ner, läggdags. */
+  firstRestAt?: string;
+  wakeCount?: number;
+  awakeMs?: number;
+  /** Gick klockan när appen lämnades (nedåtvänd och still)? Då sov
+   *  användaren vidare efter den sista pulsen, och återställningen räknar
+   *  fram till att appen öppnades igen i stället för att stanna vid pulsen. */
+  runningAtLeave?: boolean;
 }
 
 export const saveSessionCheckpoint = async (checkpoint: SessionCheckpoint): Promise<void> => {
@@ -37,18 +59,18 @@ export const clearSessionCheckpoint = async (): Promise<void> => {
 };
 
 export const DEFAULT_CATEGORIES = [
-{ id: 'focus', label: 'FOKUS', emoji: '🎯' },
-{ id: 'walk', label: 'PROMENAD', emoji: '🚶' },
-{ id: 'workout', label: 'TRÄNING', emoji: '💪' },
-{ id: 'social', label: 'SOCIALT', emoji: '💬' },
-{ id: 'clean', label: 'STÄDA', emoji: '🧹' },
+{ id: 'focus', label: 'FOCUS', emoji: '🎯' },
+{ id: 'walk', label: 'WALK', emoji: '🚶' },
+{ id: 'workout', label: 'WORKOUT', emoji: '💪' },
+{ id: 'social', label: 'SOCIAL', emoji: '💬' },
+{ id: 'clean', label: 'CLEAN', emoji: '🧹' },
 { id: 'meditate', label: 'MEDITATION', emoji: '🧘' },
-{ id: 'read', label: 'LÄSNING', emoji: '📖' },
-{ id: 'study', label: 'STUDIER', emoji: '✏️' },
-{ id: 'rest', label: 'VILA', emoji: '😴' },
-{ id: 'create', label: 'SKAPANDE', emoji: '🎨' },
-{ id: 'music', label: 'MUSIK', emoji: '🎵' },
-{ id: 'nature', label: 'NATUR', emoji: '🌲' },
+{ id: 'read', label: 'READING', emoji: '📖' },
+{ id: 'study', label: 'STUDY', emoji: '✏️' },
+{ id: 'rest', label: 'REST', emoji: '😴' },
+{ id: 'create', label: 'CREATE', emoji: '🎨' },
+{ id: 'music', label: 'MUSIC', emoji: '🎵' },
+{ id: 'nature', label: 'NATURE', emoji: '🌲' },
 ];
 
 export interface Category {
@@ -57,52 +79,54 @@ export interface Category {
   emoji: string;
 }
 
-export interface Interruption {
-  timestamp: string;                       // ISO – när appen lämnade förgrunden
-  durationMs: number;                      // avbrottets längd i ms
-  resumedOrEnded: 'resumed' | 'ended';     // vad användaren valde
-}
-
 export interface PauseLog {
   date: string;
   duration: number;
   mode: 'session';
   category?: string;
-  interruptions?: Interruption[];
-  totalInterruptionMs?: number;
-  netPauseDurationMs?: number;
 }
 
 export const saveSelectedCategories = async (categoryIds: string[]) => {
   try {
-    await FileSystem.writeAsStringAsync(CATEGORIES_PATH, JSON.stringify(categoryIds));
+    await writeDoc(CATEGORIES_PATH, JSON.stringify(categoryIds));
   } catch (e) {}
 };
 
-const CUSTOM_CATEGORIES_PATH = FileSystem.documentDirectory + 'customCategories.json';
+const CUSTOM_CATEGORIES_PATH = 'customCategories.json';
 
 export const getSelectedCategories = async (): Promise<Category[]> => {
   try {
-    const saved = await FileSystem.readAsStringAsync(CATEGORIES_PATH);
+    const saved = await readDoc(CATEGORIES_PATH);
     const ids: string[] = JSON.parse(saved);
 
     let customCats: Category[] = [];
     try {
-      const custom = await FileSystem.readAsStringAsync(CUSTOM_CATEGORIES_PATH);
+      const custom = await readDoc(CUSTOM_CATEGORIES_PATH);
       customCats = JSON.parse(custom);
     } catch (e) {}
 
     const allCategories = [...DEFAULT_CATEGORIES, ...customCats];
     return allCategories.filter(c => ids.includes(c.id));
   } catch (e) {
-    return [];
+    // Inget sparat val finns ännu — då gäller alla standardkategorier.
+    //
+    // Skillnaden mot att returnera [] är hela pausskärmens kategorirad:
+    // introduktionen frågar inte längre om aktiviteter (se CLAUDE.md), så den
+    // här grenen är numera vad *varje* ny användare möter. Tomt hade gett en
+    // rubrik utan rad, och valet hade bara gått att nå via plusknappens modal.
+    //
+    // Att grenen sitter i catch och inte efter en längdkoll är poängen:
+    // readDoc kastar när filen aldrig skrivits, medan ett sparat [] parsar
+    // till en tom lista. Den som medvetet tömt sin lista i Settings behåller
+    // alltså sitt val — bara den som aldrig valt får standarduppsättningen.
+    return [...DEFAULT_CATEGORIES];
   }
 };
 
 export const getAllCategories = async (): Promise<Category[]> => {
   let customCats: Category[] = [];
   try {
-    const custom = await FileSystem.readAsStringAsync(CUSTOM_CATEGORIES_PATH);
+    const custom = await readDoc(CUSTOM_CATEGORIES_PATH);
     customCats = JSON.parse(custom);
   } catch (e) {}
   return [...DEFAULT_CATEGORIES, ...customCats];
@@ -111,7 +135,7 @@ export const getAllCategories = async (): Promise<Category[]> => {
 export const findCategoryById = async (id: string): Promise<Category | null> => {
   let customCats: Category[] = [];
   try {
-    const custom = await FileSystem.readAsStringAsync(CUSTOM_CATEGORIES_PATH);
+    const custom = await readDoc(CUSTOM_CATEGORIES_PATH);
     customCats = JSON.parse(custom);
   } catch (e) {}
   return [...DEFAULT_CATEGORIES, ...customCats].find(c => c.id === id) ?? null;
@@ -121,12 +145,11 @@ export const logPause = async (
   duration: number,
   mode: 'session',
   category?: string,
-  interruptions?: Interruption[],
 ) => {
   try {
     let logs: PauseLog[] = [];
     try {
-      const existing = await FileSystem.readAsStringAsync(LOG_PATH);
+      const existing = await readDoc(LOG_PATH);
       logs = JSON.parse(existing);
     } catch (e) {}
 
@@ -137,40 +160,16 @@ export const logPause = async (
       category,
     };
 
-    if (interruptions && interruptions.length > 0) {
-      const totalInterruptionMs = interruptions.reduce((sum, i) => sum + i.durationMs, 0);
-      newLog.interruptions = interruptions;
-      newLog.totalInterruptionMs = totalInterruptionMs;
-      newLog.netPauseDurationMs = duration * 1000 - totalInterruptionMs;
-    }
-
     logs.push(newLog);
-    await FileSystem.writeAsStringAsync(LOG_PATH, JSON.stringify(logs));
+    await writeDoc(LOG_PATH, JSON.stringify(logs));
   } catch (e) {}
 };
 
 export const getLogs = async (): Promise<PauseLog[]> => {
   try {
-    const existing = await FileSystem.readAsStringAsync(LOG_PATH);
+    const existing = await readDoc(LOG_PATH);
     return JSON.parse(existing);
   } catch (e) {
     return [];
   }
-};
-
-const NOTIFICATION_SETTINGS_LOG_PATH = FileSystem.documentDirectory + 'notificationSettingsLog.json';
-
-export const logNotificationSettingsChange = async (settings: {
-  timesPerDay: number;
-  timeSlots: { id: string; label: string; time: string }[];
-}) => {
-  try {
-    let logs: { timesPerDay: number; timeSlots: { id: string; label: string; time: string }[]; changedAt: string }[] = [];
-    try {
-      const existing = await FileSystem.readAsStringAsync(NOTIFICATION_SETTINGS_LOG_PATH);
-      logs = JSON.parse(existing);
-    } catch (e) {}
-    logs.push({ ...settings, changedAt: new Date().toISOString() });
-    await FileSystem.writeAsStringAsync(NOTIFICATION_SETTINGS_LOG_PATH, JSON.stringify(logs));
-  } catch (e) {}
 };

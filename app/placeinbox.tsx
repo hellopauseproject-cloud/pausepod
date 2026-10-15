@@ -1,58 +1,180 @@
-import * as Haptics from 'expo-haptics';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { router, useLocalSearchParams } from 'expo-router';
 import { DeviceMotion } from 'expo-sensors';
-import { useEffect, useRef, useState } from 'react';
-import { Animated, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Animated, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useBLE } from '../context/BLEContext';
 import { useSession } from '../context/SessionContext';
+import { track } from '../lib/analytics';
 import { setInboxActive } from '../lib/inboxGuard';
-import { dimScreen, restoreScreenBrightness } from '../lib/screenBrightnessGuard';
+import { tiltDegrees } from '../lib/tilt';
+import { AppPalette } from '../constants/appTheme';
+import { RoomProvider, usePalette } from '../contexts/ThemeContext';
+import { roomShell, ScreenBackground } from '../components/screen-background';
 
 const KEEP_AWAKE_TAG = 'placeinbox';
-const RING_SIZE = 100;
 
-// Accelerometer-driven feedback — ren upplevelse. Triggar den aldrig (telefonen
-// vilar i en vinkel vi inte fångar) startar pausen ändå normalt via lådans
-// egna phone_down/lid_closed — det här styr bara text och skärmljus.
-const FLAT_THRESHOLD_RAD = 0.6;
+// v6: incheckningen sker med locket stängt — telefonen ligger i lådan och
+// ingen ser skärmen längre. Appens enda jobb här är att hjälpa fram till
+// locket (standing ↔ phonedown) och boka notisen. Resten (ring, tummar,
+// startceremoni) är lådans display, inte appens.
+//
+// Pilen går åt båda håll: instruktionen följer var telefonen faktiskt är, så
+// en telefon som reses upp igen tar skärmen tillbaka till PUT PHONE IN BOX.
+// Att stå kvar på CLOSE THE LID med telefonen i handen vore att be om något
+// som inte går att göra.
+//
+// 'abandoned' är inte ett steg i ritualen utan dess enda väg ut bakåt: lådan
+// ger upp tyst (se ABANDON-konstanterna nedan) och kan alltså inte tala om
+// att ritualen är över. Utan den här fasen stod skärmen kvar på CLOSE THE LID
+// i all evighet medan lådan sedan länge stod på loggan.
+type Phase = 'standing' | 'phonedown' | 'abandoned';
+
+/** Vilken av lådans tysta timeouts vi gav upp på — styr bara förklaringen. */
+type AbandonReason = 'lid' | 'checkin';
+
+// Mäter lutning mot tyngdkraften, inte rotation.beta/gamma — beta ensam
+// missar en telefon som står på högkant (beta ~0 där också), och rotation-
+// enheterna skiljer sig mellan plattformar. Vinkeln mot g är oberoende av
+// riktning och av det. 8° är vad ett ojämnt bord ger; en hand darrar och
+// hamnar sällan under 12°, så tröskeln skiljer "ligger" från "hålls".
+const FLAT_MAX_TILT_DEG = 8; // sänk till 5 för ännu strängare
 const MOTION_INTERVAL_MS = 200;
-const REQUIRED_CONSECUTIVE_READINGS = 2;
-const UNDO_WINDOW_MS = 5000;
+const FLAT_STABLE_MS = 800;
 
-export default function PlaceInBoxScreen() {
-  const { category } = useLocalSearchParams<{ category: string }>();
+// Vägen tillbaka: telefonen restes upp igen, alltså ligger den inte i lådan
+// och instruktionen ska vara PUT PHONE IN BOX igen. Tröskeln måste ligga
+// långt från FLAT_MAX_TILT_DEG — mellan 8° och 45° tolkas ingenting alls, och
+// utan det glappet hade en telefon på ett ojämnt bord kunnat vippa mellan de
+// två vyerna av mätbrus allena. 45° är samma gräns som den globala
+// lyft-detekteringen i _layout.tsx använder för att kalla en telefon upprest.
+const UPRIGHT_MIN_TILT_DEG = 45;
+const UPRIGHT_STABLE_MS = 500;
+
+// ── Klient-timeouts som speglar lådans tysta återgångar till IDLE ──
+// Lådan skickar ingenting när den ger upp (firmware-begränsning, se
+// CLAUDE.md), så appen måste räkna själv — annars hänger den här skärmen
+// kvar för evigt på en låda som redan slutat lyssna.
+//
+// Alla värden ligger med GRACE_MS marginal EFTER lådans egna gränser.
+// Ordningen spelar roll: ger appen upp först kan den hinna lämna skärmen
+// precis medan lådan faktiskt startar pausen. Lådan ska alltid falla först.
+const GRACE_MS = 3000;
+// Lådans AWAIT_LID_MAX_MS (90 s), räknad från det phone_down som satte
+// phonePlaced. Ett phone_down som inte ändrar något startar inte om den
+// (firmware: villkoret är `AWAITING_LID && !phonePlaced`) — se
+// awaitLidSinceRef, det är ankaret och inte den här konstanten som bär
+// skillnaden.
+const ABANDON_AFTER_PHONE_DOWN_MS = 90000 + GRACE_MS;
+// Innan phone_down ligger lådans PHONE_WAIT_MAX_MS (20 s) före AWAIT_LID_MAX_MS:
+// den flippar till CLOSE BOX på egen hand och startar om de 90 sekunderna då.
+const ABANDON_BEFORE_PHONE_DOWN_MS = 20000 + 90000 + GRACE_MS;
+// Lådans CHECKIN_TIMEOUT_MS (30 s) räknat från lid_closed. Den pausas så fort
+// en tumme rör en platta, så marginalen behöver bara täcka själva ifyllnaden.
+const ABANDON_AFTER_LID_CLOSED_MS = 30000 + GRACE_MS;
+
+/**
+ * Hör till **pause-rummet**. Rummet följer ärendet och inte filträdet — se
+ * ROOMS i [constants/appTheme.ts](../constants/appTheme.ts). Skalet är
+ * identiskt med de andra rummens: en komponent kan inte läsa sin egen
+ * provider, och en bakgrund i skalet täcker varje gren skärmen returnerar.
+ */
+export default function PlaceInBoxRoom() {
+  return (
+    <RoomProvider room="pause">
+      <View style={roomShell}>
+        <ScreenBackground room="pause" />
+        <PlaceInBoxScreen />
+      </View>
+    </RoomProvider>
+  );
+}
+
+function PlaceInBoxScreen() {
+  const Palette = usePalette();
+  const styles = useMemo(() => makeStyles(Palette), [Palette]);
+  const { category, targetSeconds } = useLocalSearchParams<{ category: string; targetSeconds?: string }>();
   const { state, dispatch } = useSession();
-  const { sendPhoneDown } = useBLE();
-  const { phase, touches } = state;
+  const { sendPhoneDown, sendPhoneUp, subscribeToBoxMessages } = useBLE();
 
-  // Checkin-fasens feedback
-  const ringFill = useRef(new Animated.Value(0)).current;
-  const bothDown = touches.left && touches.right;
-  const prevTouchesRef = useRef(touches);
-  const prevPhaseRef = useRef(phase);
+  const [phase, setPhase] = useState<Phase>('standing');
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
-  // sendPhoneDown byter identitet varje render av BLEProvider (inte
-  // memoiserad) — en ref håller DeviceMotion-effekten nedan äkta mount-once.
+
+  const [abandonReason, setAbandonReason] = useState<AbandonReason | null>(null);
+
+  // sendPhoneDown/sendPhoneUp byter identitet varje render av BLEProvider
+  // (inte memoiserade) — refs håller detektionseffekten fri från dem som deps.
   const sendPhoneDownRef = useRef(sendPhoneDown);
   sendPhoneDownRef.current = sendPhoneDown;
+  const sendPhoneUpRef = useRef(sendPhoneUp);
+  sendPhoneUpRef.current = sendPhoneUp;
 
-  // Animationer
+
+  // ── Ankaret för lådans AWAIT_LID_MAX_MS ──
+  // Nu när telefonen kan resas upp och läggas ner om och om igen duger det
+  // inte att starta en ny timeout vid varje växling: lådan gör inte det.
+  // Dess nedräkning startar om bara där firmware kör setPhase(AWAITING_LID),
+  // dvs vid set_mode (= den här skärmens montering), vid FÖRSTA phone_down,
+  // och när ett öppnat lock tar den tillbaka hit ur CHECKING_IN. Räknade
+  // appen om vid varje vändning skulle den kunna stå kvar minuter efter att
+  // lådan för länge sedan gått till loggan — samma hängande skärm som hela
+  // abandoned-vyn finns för att undvika.
+  const awaitLidSinceRef = useRef(Date.now());
+  // Speglar lådans `phonePlaced`, och avgör därmed vilken av de två
+  // gränserna som gäller: 90 s när lådan vet att telefonen ligger, annars
+  // 20 s + 90 s eftersom den då först flippar till CLOSE BOX på egen hand.
+  const boxSawPhoneDownRef = useRef(false);
+  const prevSessionPhaseRef = useRef(state.phase);
+
+  // De två spegelvända halvorna av lådans `phonePlaced` + `phaseStartMs`.
+  // markPhoneDown no-opar när lådan redan vet att telefonen ligger, eftersom
+  // firmware då inte heller kör setPhase och inte startar om sin nedräkning.
+  const markPhoneDown = () => {
+    if (boxSawPhoneDownRef.current) return;
+    boxSawPhoneDownRef.current = true;
+    awaitLidSinceRef.current = Date.now();
+    // Bara FÖRSTA nedläggningen per försök, eftersom funktionen no-opar
+    // efter den. Vändningarna därefter räknas som phone_raised_again, och
+    // det är skillnaden mellan dem som säger om steget är svårt.
+    track('phone_placed_down');
+  };
+  const markPhoneUp = () => {
+    boxSawPhoneDownRef.current = false;
+    awaitLidSinceRef.current = Date.now();
+    track('phone_raised_again');
+  };
+
   const breathe = useRef(new Animated.Value(1)).current;
-  const pulse = useRef(new Animated.Value(1)).current;
-  const pulseOpacity = useRef(new Animated.Value(0.3)).current;
 
-  // ── Lutningsdetektion (bara relevant i checked_in) ──
-  const [phoneFlat, setPhoneFlat] = useState(false);
-  const rawStreakRef = useRef<{ value: 'upright' | 'flat'; count: number }>({ value: 'upright', count: 0 });
-  const confirmedFlatRef = useRef(false);
-  const flatSinceRef = useRef<number | null>(null);
-  const hasSentPhoneDownRef = useRef(false);
+  // ── Ge upp ritualen. Samma väg ut oavsett vilken av lådans timeouts som
+  // gick ut: nollställ sessionen (annars blockerar ENTER_CHECKIN:s idle-krav
+  // nästa försök). Här avbokades förr en lokal notis också; appen skickar
+  // inga notiser längre. ──
+  const abandon = (reason: AbandonReason) => {
+    if (phaseRef.current === 'abandoned') return;
+    console.log('PlaceInBox: lådan har gett upp (', reason, ') — lämnar ritualen');
 
-  // ── Gå in i incheckningsläget. Bara om vi kommer hit från idle — en
-  // RESTORE efter återanslutning kan redan ha satt oss i checked_in/awaiting_lid. ──
+    // Enda vägen bakåt ur ritualen, och den lämnar inget spår i
+    // pause_sessions: lådan skickar ingenting vid sina tysta timeouts, så
+    // utan den här raden är ett övergivet försök osynligt. 'checkin' betyder
+    // att locket stängdes men ingen höll tummarna — alltså att grinden som
+    // ingen vet finns är det som stoppar folk.
+    track('pause_abandoned', { reason, box_saw_phone_down: boxSawPhoneDownRef.current });
+
+    setInboxActive(false);
+    dispatch({ type: 'RESET' });
+    setAbandonReason(reason);
+    setPhase('abandoned');
+  };
+  const abandonRef = useRef(abandon);
+  abandonRef.current = abandon;
+
+  // ── Gå in i väntan på att telefonen ställs i lådan. Bara om vi kommer
+  // hit från idle — en RESTORE efter återanslutning kan redan ha satt oss
+  // längre fram i ritualen. ──
   useEffect(() => {
+    track('placeinbox_shown', { category: category || null });
     if (state.phase === 'idle') {
       dispatch({ type: 'ENTER_CHECKIN', category: category || undefined });
     }
@@ -65,20 +187,20 @@ export default function PlaceInBoxScreen() {
     return () => setInboxActive(false);
   }, []);
 
-  // ── Skärmen får inte slockna medan tummarna ska hållas ──
+  // ── Skärmen får inte slockna under hela ritualen — DeviceMotion slutar
+  // leverera avläsningar när skärmen släcks, och både nedläggningen här och
+  // den globala lyft-detekteringen i _layout.tsx bygger på den. Låset
+  // släpptes förr så fort telefonen låg ner; då hann skärmen somna medan
+  // lådan väntade på incheckning (dess grace är 30 s), och sensorn var död
+  // när telefonen sedan lyftes ur lådan. Skärmen lyser alltså vaken inne i
+  // lådan, men den är stängd — ingen ser den. /pausing tar över låset med
+  // useKeepAwake() när den här skärmen lämnas. ──
   useEffect(() => {
-    if (phase === 'checking_in' || phase === 'checked_in') {
-      activateKeepAwakeAsync(KEEP_AWAKE_TAG).catch(() => {});
-    } else {
-      deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {});
-    }
-  }, [phase]);
-  useEffect(() => () => { deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {}); }, []);
+    activateKeepAwakeAsync(KEEP_AWAKE_TAG).catch(() => {});
+    return () => { deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {}); };
+  }, []);
 
-  // ── Skärmljus städas alltid upp när den här skärmen lämnas, oavsett anledning. ──
-  useEffect(() => () => { restoreScreenBrightness(); }, []);
-
-  // ── Andningsanimation (alltid aktiv) ──
+  // ── Andningsanimation (alltid aktiv i standing) ──
   useEffect(() => {
     const anim = Animated.loop(
       Animated.sequence([
@@ -90,166 +212,208 @@ export default function PlaceInBoxScreen() {
     return () => anim.stop();
   }, []);
 
-  // ── Ringfyllning: kosmetisk lokal 1,5s-timer medan båda tummarna hålls.
-  // Släpps en tumme innan checkin_complete kommit från lådan, backar ringen
-  // mjukt (inte ett reset) — och fasen ligger kvar i checking_in tills
-  // lådan själv säger klart. ──
+  // ── Lutningsdetektion, båda riktningarna. Platt → phonedown (och
+  // phone_down till lådan), upprest igen → tillbaka till standing: lyfter man
+  // telefonen ur lådan står det PUT PHONE IN BOX igen, vilket är den enda
+  // instruktion som stämmer med var telefonen faktiskt är.
+  //
+  // EN prenumeration för båda hållen, med riktningen läst ur phaseRef i
+  // stället för ur deps. Ett vippande läge river då inte ner och bygger upp
+  // DeviceMotion om och om igen — och det är just vid nedrivningen
+  // stabilitetsräknarna nollställs, dvs precis det som gör en detektor trög
+  // när den behöver vara pålitlig.
+  //
+  // Bara medan locket fortfarande är öppet (state.phase === 'awaiting_lid').
+  // Är locket stängt ligger telefonen i en låda som kan lyftas och bäras, och
+  // då säger lutningen ingenting om var telefonen är. ──
   useEffect(() => {
-    if (phase !== 'checking_in') return;
-    if (bothDown) {
-      Animated.timing(ringFill, {
-        toValue: 1,
-        duration: 1500,
-        useNativeDriver: false,
-      }).start();
-    } else {
-      Animated.timing(ringFill, {
-        toValue: 0,
-        duration: 400,
-        useNativeDriver: false,
-      }).start();
-    }
-  }, [bothDown, phase]);
+    if (state.phase !== 'awaiting_lid') return;
+    let cancelled = false;
+    let sub: { remove: () => void } | null = null;
 
-  // ── Haptik vid tumkontakt och vid klar incheckning; navigera vidare när pausen väl startat ──
-  useEffect(() => {
-    if (touches.left && !prevTouchesRef.current.left) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    if (touches.right && !prevTouchesRef.current.right) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    prevTouchesRef.current = touches;
-  }, [touches.left, touches.right]);
+    (async () => {
+      await DeviceMotion.requestPermissionsAsync();
+      if (cancelled) return;
 
-  useEffect(() => {
-    if (prevPhaseRef.current === 'checking_in' && phase === 'checked_in') {
-      Animated.timing(ringFill, { toValue: 1, duration: 150, useNativeDriver: false }).start();
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    }
-    if (phase === 'active') {
-      router.replace({ pathname: '/pausing', params: { mode: 'session', withPod: 'true' } } as never);
-    }
-    prevPhaseRef.current = phase;
-  }, [phase]);
+      DeviceMotion.setUpdateInterval(MOTION_INTERVAL_MS);
+      let flatSinceMs: number | null = null;
+      let uprightSinceMs: number | null = null;
 
-  // ── Lutningsdetektion: prenumereras en gång vid mount, tas bort vid unmount.
-  // Ingen omprenumeration vid fasbyten — callbacken själv ignorerar allt
-  // utanför checked_in. ──
-  useEffect(() => {
-    DeviceMotion.setUpdateInterval(MOTION_INTERVAL_MS);
-    const sub = DeviceMotion.addListener(({ rotation }) => {
-      if (phaseRef.current !== 'checked_in' || !rotation) return;
+      sub = DeviceMotion.addListener(({ accelerationIncludingGravity: g }) => {
+        if (!g) return;
+        const tiltDeg = tiltDegrees(g);
+        if (tiltDeg === null) return;
+        if (phaseRef.current === 'abandoned') return;
 
-      const raw: 'upright' | 'flat' = Math.abs(rotation.beta) < FLAT_THRESHOLD_RAD ? 'flat' : 'upright';
-      if (rawStreakRef.current.value === raw) {
-        rawStreakRef.current.count += 1;
-      } else {
-        rawStreakRef.current = { value: raw, count: 1 };
-      }
-      if (rawStreakRef.current.count < REQUIRED_CONSECUTIVE_READINGS) return;
+        if (phaseRef.current === 'standing') {
+          uprightSinceMs = null;
+          if (tiltDeg > FLAT_MAX_TILT_DEG) { flatSinceMs = null; return; }
+          if (flatSinceMs === null) { flatSinceMs = Date.now(); return; }
+          if (Date.now() - flatSinceMs < FLAT_STABLE_MS) return;
 
-      const confirmedFlat = raw === 'flat';
-      if (confirmedFlat === confirmedFlatRef.current) return;
-
-      if (confirmedFlat) {
-        confirmedFlatRef.current = true;
-        flatSinceRef.current = Date.now();
-        setPhoneFlat(true);
-        dimScreen();
-        if (!hasSentPhoneDownRef.current) {
-          hasSentPhoneDownRef.current = true;
+          flatSinceMs = null;
+          // Lådan startar om sin nedräkning bara på ett phone_down som
+          // faktiskt ändrar phonePlaced (firmware: `AWAITING_LID &&
+          // !phonePlaced`). Appens klocka ankras likadant — se markPhoneDown.
+          markPhoneDown();
           sendPhoneDownRef.current().catch(() => {});
-        }
-      } else {
-        const elapsed = flatSinceRef.current ? Date.now() - flatSinceRef.current : Infinity;
-        if (elapsed < UNDO_WINDOW_MS) {
-          // Justering, inte ett ångrande — låt allt vara som det är.
+          setPhase('phonedown');
           return;
         }
-        confirmedFlatRef.current = false;
-        flatSinceRef.current = null;
-        hasSentPhoneDownRef.current = false;
-        setPhoneFlat(false);
-        restoreScreenBrightness();
-      }
-    });
 
-    return () => sub.remove();
-  }, []);
+        flatSinceMs = null;
+        if (tiltDeg < UPRIGHT_MIN_TILT_DEG) { uprightSinceMs = null; return; }
+        if (uprightSinceMs === null) { uprightSinceMs = Date.now(); return; }
+        if (Date.now() - uprightSinceMs < UPRIGHT_STABLE_MS) return;
 
-  // ── Pulsanimation medan vi väntar på att locket stängs ──
+        uprightSinceMs = null;
+        // Lådan nollar phonePlaced och börjar om på PHONE_WAIT_MAX_MS +
+        // AWAIT_LID_MAX_MS, alltså exakt samma fönster som direkt efter
+        // set_mode. markPhoneUp flyttar ankaret hit så att appens frist
+        // följer med.
+        markPhoneUp();
+        sendPhoneUpRef.current().catch(() => {});
+        setPhase('standing');
+      });
+    })();
+
+    return () => { cancelled = true; sub?.remove(); };
+  }, [state.phase]);
+
+  // ── Väntan på locket. Armad så länge reducern fortfarande står i
+  // awaiting_lid; lid_closed flyttar den till checking_in och river därmed
+  // timern.
+  //
+  // Timern räknas alltid mot awaitLidSinceRef, inte från när effekten råkar
+  // köra — den kör om vid varje vändning mellan standing och phonedown, och
+  // en färsk setTimeout där hade förlängt fristen varje gång man lyfte
+  // telefonen. Se ankaret ovan. ──
   useEffect(() => {
-    if (phase !== 'awaiting_lid') return;
-    const anim = Animated.loop(
-      Animated.parallel([
-        Animated.sequence([
-          Animated.timing(pulse, { toValue: 2.2, duration: 1400, useNativeDriver: true }),
-          Animated.timing(pulse, { toValue: 1, duration: 1400, useNativeDriver: true }),
-        ]),
-        Animated.sequence([
-          Animated.timing(pulseOpacity, { toValue: 0.7, duration: 1400, useNativeDriver: true }),
-          Animated.timing(pulseOpacity, { toValue: 0, duration: 1400, useNativeDriver: true }),
-        ]),
-      ])
-    );
-    anim.start();
-    return () => anim.stop();
-  }, [phase]);
+    const prevSessionPhase = prevSessionPhaseRef.current;
+    prevSessionPhaseRef.current = state.phase;
+    if (state.phase !== 'awaiting_lid' || phase === 'abandoned') return;
+
+    // Locket öppnades ur checking_in: lådan körde setPhase(AWAITING_LID) och
+    // började om på 90 s, med phonePlaced tvingad till true (locket har varit
+    // stängt, alltså ligger telefonen i lådan).
+    if (prevSessionPhase === 'checking_in') {
+      awaitLidSinceRef.current = Date.now();
+      boxSawPhoneDownRef.current = true;
+    }
+
+    const windowMs = boxSawPhoneDownRef.current
+      ? ABANDON_AFTER_PHONE_DOWN_MS
+      : ABANDON_BEFORE_PHONE_DOWN_MS;
+    const remainingMs = Math.max(0, awaitLidSinceRef.current + windowMs - Date.now());
+    const timer = setTimeout(() => abandonRef.current('lid'), remainingMs);
+    return () => clearTimeout(timer);
+  }, [state.phase, phase]);
+
+  // ── Väntan på tummarna. Bara i checking_in: har vi väl nått checked_in
+  // har lådan bevisligen startat sessionen (checkin_complete skickas i samma
+  // andetag som startSession()), och då vore det fel att ge upp — _layout.tsx
+  // fångar den sessionen globalt via session_ended.
+  //
+  // Öppnas locket rivs timern (reducern går tillbaka till awaiting_lid) och
+  // armas från noll när locket stängs igen — lådans CHECKIN_TIMEOUT_MS
+  // räknas likadant, från varje setPhase(CHECKING_IN). ──
+  useEffect(() => {
+    if (state.phase !== 'checking_in' || phase === 'abandoned') return;
+    const timer = setTimeout(() => abandonRef.current('checkin'), ABANDON_AFTER_LID_CLOSED_MS);
+    return () => clearTimeout(timer);
+  }, [state.phase, phase]);
+
+  // ── Locket stängs: box:en tar över ritualen helt härifrån.
+  //
+  // Öppnas locket igen innan incheckningen är klar avbryts INTE försöket:
+  // lådan går tillbaka till CLOSE BOX och reducern följer med till
+  // awaiting_lid, så den här skärmen står kvar på CLOSE THE LID och locket
+  // kan bara stängas igen. Locket kan alltså stängas flera gånger under
+  // samma försök.
+  //
+  // Här bokades förr en lokal notis per stängning (och avbokades vid nästa,
+  // så att de inte lades på hög). Appen skickar inga notiser längre, så
+  // lyssnaren står kvar tom med flit: den dokumenterar att ingenting ska
+  // hända här, och lid_closed hanteras av reducern via SessionContext. ──
+  useEffect(() => subscribeToBoxMessages((message) => {
+    if (message.type !== 'lid_closed' || phaseRef.current !== 'phonedown') return;
+
+    const seconds = parseInt(targetSeconds ?? '0', 10);
+    if (!Number.isFinite(seconds) || seconds <= 0) return;
+
+    // Här bokades förr en notis om när locket skulle öppnas. Appen skickar
+    // inga notiser längre, så lådans nedräkning är helt lådans.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [subscribeToBoxMessages]);
+
+  // ── Ritualens två milstolpar, för tratten i analytics.pause_funnel.
+  // `checking_in` nås bara via lid_closed och `active` bara via en färdig
+  // incheckning, så fasövergångarna är milstolparna — ingen av dem behöver
+  // en egen lyssnare på BLE-meddelandena.
+  //
+  // Egen ref och inte prevSessionPhaseRef ovan: den skrivs inne i en effekt
+  // som avbryter tidigt, och två läsare av samma ref hade hängt på vilken
+  // effekt React råkar köra först. ──
+  const trackedPhaseRef = useRef(state.phase);
+  useEffect(() => {
+    const prev = trackedPhaseRef.current;
+    trackedPhaseRef.current = state.phase;
+    if (prev === state.phase) return;
+    if (state.phase === 'checking_in') track('box_lid_closed');
+    if (state.phase === 'active') track('pause_started', { with_pod: true, category: category || null });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.phase]);
+
+  // ── Lådan äger resten av ritualen (tummar, startceremoni). Så fort den
+  // säger att pausen räknar, navigera vidare — appen gör inget mer här. ──
+  useEffect(() => {
+    if (state.phase === 'active') {
+      router.replace({ pathname: '/pausing', params: { mode: 'session', withPod: 'true' } } as never);
+    }
+  }, [state.phase]);
 
   return (
     <View style={styles.container}>
-
-      {/* ── Tumgesten ── */}
-      {(phase === 'checking_in' || phase === 'idle') && (
+      {phase === 'standing' && (
         <View style={styles.centerScreen}>
           <Animated.View style={[styles.circle, { transform: [{ scale: breathe }] }]} />
-          <Text style={styles.title}>CHECKA IN{'\n'}MED TUMMARNA</Text>
-          <View style={styles.checkinRow}>
-            <View style={[styles.touchMarker, touches.left && styles.touchMarkerActive]} />
-            <View style={styles.ringWrap}>
-              <View style={styles.ringTrack} />
-              <Animated.View
-                style={[
-                  styles.ringFillClip,
-                  {
-                    height: ringFill.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }),
-                  },
-                ]}
-              />
-            </View>
-            <View style={[styles.touchMarker, touches.right && styles.touchMarkerActive]} />
-          </View>
+          <Text style={styles.title}>PUT PHONE{'\n'}IN BOX</Text>
         </View>
       )}
 
-      {/* ── Lägg ner telefonen ── */}
-      {phase === 'checked_in' && (
+      {phase === 'phonedown' && (
         <View style={styles.centerScreen}>
-          <Text style={styles.title}>{phoneFlat ? 'LÄGG PÅ\nLOCKET' : 'LÄGG NER\nTELEFONEN'}</Text>
+          <View style={[styles.circle, styles.circleActive]} />
+          <Text style={styles.title}>CLOSE{'\n'}THE LID</Text>
+          {/* Sista steget måste stå här, medan skärmen fortfarande går att
+              läsa — när locket väl är stängt ligger telefonen inne i lådan.
+              Utan den här raden vet ingen att pausen kräver tummarna, och
+              lådan faller tillbaka till loggan efter 30 s utan att någon
+              paus räknats. */}
+          <Text style={styles.nextStep}>THEN HOLD{'\n'}BOTH PADS</Text>
         </View>
       )}
 
-      {/* ── Stäng locket ── */}
-      {phase === 'awaiting_lid' && (
-        <View style={styles.centerScreen}>
-          <View style={styles.pulseWrapper}>
-            <Animated.View
-              style={[
-                styles.pulseRing,
-                { transform: [{ scale: pulse }], opacity: pulseOpacity },
-              ]}
-            />
-            <View style={[styles.circle, styles.circleActive]} />
-          </View>
-          <Text style={styles.title}>STÄNG{'\n'}LOCKET</Text>
-        </View>
+      {phase === 'abandoned' && (
+        <Pressable style={styles.centerScreen} onPress={() => router.replace('/pause')}>
+          <View style={[styles.circle, styles.circleIdle]} />
+          <Text style={styles.title}>PAUSE{'\n'}NOT STARTED</Text>
+          <Text style={styles.explanation}>
+            {abandonReason === 'checkin'
+              ? 'The lid closed, but nobody held both pads on the box — so it let the pause go.'
+              : 'The box stopped waiting for the lid and went back to sleep.'}
+          </Text>
+          <Text style={styles.nextStep}>TAP TO{'\n'}TRY AGAIN</Text>
+        </Pressable>
       )}
-
     </View>
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (Palette: AppPalette) => StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0a0a1a',
+    backgroundColor: 'transparent',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -263,68 +427,41 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 26,
     fontWeight: '900',
-    color: '#e8f0ff',
+    color: Palette.textPrimary,
     textAlign: 'center',
     letterSpacing: 1,
     lineHeight: 34,
+  },
+  // Samma versala displayröst som titeln, en nivå ner i ljusstyrka — ett
+  // nästa steg, inte en andra rubrik.
+  nextStep: {
+    fontSize: 16,
+    fontWeight: '900',
+    color: Palette.textSecondary,
+    textAlign: 'center',
+    letterSpacing: 1,
+    lineHeight: 22,
+    marginTop: -20,
+  },
+  explanation: {
+    fontSize: 14,
+    color: Palette.textTertiary,
+    textAlign: 'center',
+    lineHeight: 20,
+    paddingHorizontal: 40,
+    marginTop: -20,
   },
   circle: {
     width: 100,
     height: 100,
     borderRadius: 50,
-    backgroundColor: '#2e86de',
+    backgroundColor: Palette.accent,
     opacity: 0.5,
   },
   circleActive: {
     opacity: 1,
   },
-  pulseWrapper: {
-    width: 180,
-    height: 180,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  pulseRing: {
-    position: 'absolute',
-    width: 100,
-    height: 100,
-    borderRadius: 50,
-    backgroundColor: 'rgba(46, 134, 222, 0.3)',
-  },
-
-  // ── Checkin ──
-  checkinRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 28,
-  },
-  touchMarker: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderWidth: 2,
-    borderColor: 'rgba(255,255,255,0.15)',
-  },
-  touchMarkerActive: {
-    backgroundColor: '#27ae60',
-    borderColor: '#27ae60',
-  },
-  ringWrap: {
-    width: RING_SIZE,
-    height: RING_SIZE,
-    borderRadius: RING_SIZE / 2,
-    overflow: 'hidden',
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    borderWidth: 2,
-    borderColor: 'rgba(46, 134, 222, 0.3)',
-    justifyContent: 'flex-end',
-  },
-  ringTrack: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  ringFillClip: {
-    width: '100%',
-    backgroundColor: '#27ae60',
+  circleIdle: {
+    opacity: 0.15,
   },
 });

@@ -2,64 +2,89 @@ import { Entypo, FontAwesome5 } from '@expo/vector-icons';
 import * as FileSystem from 'expo-file-system/legacy';
 import DismissKeyboardView from './components/DismissKeyboardView';
 import { router } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Alert, KeyboardAvoidingView, Platform, ScrollView, StyleSheet,
   Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
 import { useAuth } from '../contexts/AuthContext';
-import { sendPushNotification } from '../lib/notifications';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { enablePushNotifications } from '../lib/notifications';
 import { supabase } from '../lib/supabase';
+import { storyExpiresAt } from '../lib/supportStories';
 import { Category, DEFAULT_CATEGORIES } from './pauseLogger';
+import { AppPalette, alpha } from '../constants/appTheme';
+import { RoomProvider, usePalette } from '../contexts/ThemeContext';
+import { roomShell, ScreenBackground } from '../components/screen-background';
 
 const CUSTOM_CATEGORIES_PATH = (FileSystem.documentDirectory ?? '') + 'customCategories.json';
 
 const SUPPORT_TYPES = [
-  { id: 'tröst', label: 'Tröst' },
-  { id: 'värme', label: 'Värme' },
-  { id: 'närvaro', label: 'Närvaro' },
-  { id: 'sällskap', label: 'Sällskap' },
-  { id: 'empati', label: 'Empati' },
-  { id: 'förståelse', label: 'Förståelse' },
-  { id: 'stöd', label: 'Stöd' },
-  { id: 'lugn', label: 'Lugn' },
-  { id: 'hopp', label: 'Hopp' },
-  { id: 'skratt', label: 'Skratt' },
-  { id: 'pepp', label: 'Pepp' },
-  { id: 'hejarop', label: 'Hejarop' },
-  { id: 'en knuff', label: 'En knuff' },
-  { id: 'hjälp att börja', label: 'Hjälp att börja' },
-  { id: 'råd', label: 'Råd' },
-  { id: 'perspektiv', label: 'Perspektiv' },
-  { id: 'klarhet', label: 'Klarhet' },
-  { id: 'visdom', label: 'Visdom' },
-  { id: 'strategi', label: 'Strategi' },
-  { id: 'ärlighet', label: 'Ärlighet' },
+  { id: 'tröst', label: 'Comfort' },
+  { id: 'värme', label: 'Warmth' },
+  { id: 'närvaro', label: 'Presence' },
+  { id: 'sällskap', label: 'Company' },
+  { id: 'empati', label: 'Empathy' },
+  { id: 'förståelse', label: 'Understanding' },
+  { id: 'stöd', label: 'Support' },
+  { id: 'lugn', label: 'Calm' },
+  { id: 'hopp', label: 'Hope' },
+  { id: 'skratt', label: 'Laughter' },
+  { id: 'pepp', label: 'Pep' },
+  { id: 'hejarop', label: 'Cheering' },
+  { id: 'en knuff', label: 'A nudge' },
+  { id: 'hjälp att börja', label: 'Help getting started' },
+  { id: 'råd', label: 'Advice' },
+  { id: 'perspektiv', label: 'Perspective' },
+  { id: 'klarhet', label: 'Clarity' },
+  { id: 'visdom', label: 'Wisdom' },
+  { id: 'strategi', label: 'Strategy' },
+  { id: 'ärlighet', label: 'Honesty' },
   { id: 'reality check', label: 'Reality check' },
-  { id: 'motivationstal', label: 'Motivationstal' },
-  { id: 'predikan', label: 'Predikan' },
-  { id: 'tillsägelse', label: 'Tillsägelse' },
+  { id: 'motivationstal', label: 'Pep talk' },
+  { id: 'predikan', label: 'Lecture' },
+  { id: 'tillsägelse', label: 'A talking-to' },
 ];
 
 const CATEGORY_VERB: Record<string, string> = {
-  focus: 'fokusera',
-  walk: 'promenera',
-  workout: 'träna',
-  social: 'umgås',
-  clean: 'städa',
-  meditate: 'meditera',
-  read: 'läsa',
-  study: 'studera',
-  rest: 'vila',
-  create: 'skapa',
-  music: 'spela musik',
-  nature: 'vara i naturen',
+  focus: 'focus',
+  walk: 'go for a walk',
+  workout: 'work out',
+  social: 'hang out',
+  clean: 'clean',
+  meditate: 'meditate',
+  read: 'read',
+  study: 'study',
+  rest: 'rest',
+  create: 'create',
+  music: 'play music',
+  nature: 'be in nature',
 };
 
 const CARD_W = 82;
 const CARD_GAP = 12;
 
-export default function SupportStoryCreateScreen() {
+/**
+ * Hör till **friends-rummet**. Rummet följer ärendet och inte filträdet — se
+ * ROOMS i [constants/appTheme.ts](../constants/appTheme.ts). Skalet är
+ * identiskt med de andra rummens: en komponent kan inte läsa sin egen
+ * provider, och en bakgrund i skalet täcker varje gren skärmen returnerar.
+ */
+export default function SupportStoryCreateRoom() {
+  return (
+    <RoomProvider room="friends">
+      <View style={roomShell}>
+        <ScreenBackground room="friends" />
+        <SupportStoryCreateScreen />
+      </View>
+    </RoomProvider>
+  );
+}
+
+function SupportStoryCreateScreen() {
+  const Palette = usePalette();
+  const s = useMemo(() => makeS(Palette), [Palette]);
+  const insets = useSafeAreaInsets();
   const { user } = useAuth();
   const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
   const [supportTypeExpanded, setSupportTypeExpanded] = useState(false);
@@ -100,35 +125,20 @@ export default function SupportStoryCreateScreen() {
         activity,
         intention_id: intentionId,
         personal_note: personalNote.trim() || null,
+        expires_at: storyExpiresAt(),
       });
-      if (error) { setSubmitting(false); Alert.alert('Fel', error.message); return; }
+      if (error) { setSubmitting(false); Alert.alert('Error', error.message); return; }
+
+      // Den som just bett om stöd vill veta när svaret kommer — se
+      // `enablePushNotifications`. Väntas inte in.
+      enablePushNotifications().catch(() => {});
 
       const { data: myProfile } = await supabase
         .from('profiles').select('username').eq('id', user.id).maybeSingle();
-      const userName = myProfile?.username ?? 'Någon';
-      const { data: friendships } = await supabase
-        .from('friendships')
-        .select('requester_id, receiver_id, req:profiles!requester_id(id, push_token), rec:profiles!receiver_id(id, push_token)')
-        .or(`requester_id.eq.${user.id},receiver_id.eq.${user.id}`)
-        .eq('status', 'accepted');
-
-      for (const f of (friendships ?? [])) {
-        const reqProfile = (f as any).req;
-        const recProfile = (f as any).rec;
-        const friendProfile = reqProfile?.id !== user.id ? reqProfile : recProfile;
-        if (friendProfile?.id && friendProfile.id !== user.id && friendProfile.push_token) {
-          sendPushNotification(
-            friendProfile.push_token,
-            `${userName} ber om stöd`,
-            'Klicka för att läsa mer',
-            { screen: 'friends', type: 'support_story' }
-          );
-        }
-      }
       router.back();
     } catch (e: any) {
       setSubmitting(false);
-      Alert.alert('Fel', e?.message ?? 'Okänt fel');
+      Alert.alert('Error', e?.message ?? 'Unknown error');
     }
   };
 
@@ -139,19 +149,19 @@ export default function SupportStoryCreateScreen() {
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
-        <DismissKeyboardView style={s.content}>
+        <DismissKeyboardView style={[s.content, { paddingTop: Math.max(24, insets.top - 8) }]}>
         {/* Header */}
         <View style={s.header}>
           <TouchableOpacity onPress={() => router.back()} style={s.backBtn}>
-            <FontAwesome5 name="chevron-left" size={15} color="#2e86de" />
+            <FontAwesome5 name="chevron-left" size={15} color={Palette.accent} />
           </TouchableOpacity>
-          <Text style={s.title}>Be om stöd</Text>
+          <Text style={s.title}>Ask for support</Text>
           <View style={{ width: 40 }} />
         </View>
 
         {/* 1. INTENTION */}
         <View style={s.section}>
-          <Text style={s.sectionLabel}>Vad vill du?</Text>
+          <Text style={s.sectionLabel}>What do you want?</Text>
           {showFreeText ? (
             <View>
               <TouchableOpacity
@@ -159,8 +169,8 @@ export default function SupportStoryCreateScreen() {
                 style={s.backToCarouselBtn}
                 activeOpacity={0.7}
               >
-                <FontAwesome5 name="chevron-left" size={11} color="#a29bfe" />
-                <Text style={s.backToCarouselText}>Välj intention</Text>
+                <FontAwesome5 name="chevron-left" size={11} color={Palette.community} />
+                <Text style={s.backToCarouselText}>Choose intention</Text>
               </TouchableOpacity>
               <View style={s.freeInputRow}>
                 <View style={{ justifyContent: 'center', alignItems: 'center' }}>
@@ -173,15 +183,15 @@ export default function SupportStoryCreateScreen() {
                     textAlign="center"
                   />
                   {!freeEmoji && (
-                    <Entypo name="emoji-happy" size={22} color="rgba(255,255,255,0.2)" style={{ position: 'absolute', pointerEvents: 'none' }} />
+                    <Entypo name="emoji-happy" size={22} color={Palette.ink20} style={{ position: 'absolute', pointerEvents: 'none' }} />
                   )}
                 </View>
                 <TextInput
                   style={[s.textInput, { flex: 1 }]}
                   value={freeActivity}
                   onChangeText={t => { if (t.length <= 50) setFreeActivity(t); }}
-                  placeholder="Vad vill du göra?"
-                  placeholderTextColor="rgba(255,255,255,0.2)"
+                  placeholder="What do you want to do?"
+                  placeholderTextColor={Palette.ink20}
                   maxLength={50}
                   autoFocus
                 />
@@ -218,28 +228,28 @@ export default function SupportStoryCreateScreen() {
                 activeOpacity={0.75}
               >
                 <Text style={s.carouselEmoji}>✏️</Text>
-                <Text style={s.carouselLabel}>Skriv eget</Text>
+                <Text style={s.carouselLabel}>Write your own</Text>
               </TouchableOpacity>
             </ScrollView>
           )}
         </View>
 
-        {/* 3. PERSONLIG RAD */}
+        {/* 3. PERSONAL NOTE */}
         <View style={s.section}>
-          <Text style={s.sectionLabel}>Vill du lägga till något?</Text>
+          <Text style={s.sectionLabel}>Want to add something?</Text>
           <TextInput
             style={[s.textInput, s.noteInput]}
             value={personalNote}
             onChangeText={t => { if (t.length <= 100) setPersonalNote(t); }}
-            placeholder="T.ex. 'Har provtenta imorgon'"
-            placeholderTextColor="rgba(255,255,255,0.2)"
+            placeholder="E.g. 'Have a test tomorrow'"
+            placeholderTextColor={Palette.ink20}
             maxLength={100}
             multiline
           />
           <Text style={s.charCount}>{100 - personalNote.length}</Text>
         </View>
 
-        {/* 3. SPECIFIKT SORTS STÖD — kollapsad */}
+        {/* 3. SPECIFIC KIND OF SUPPORT — collapsed */}
         <View style={s.expandSection}>
           <TouchableOpacity
             style={s.expandToggle}
@@ -249,25 +259,25 @@ export default function SupportStoryCreateScreen() {
             <Text style={s.expandToggleText}>
               {selectedTypes.length > 0
                 ? selectedTypes.map(id => SUPPORT_TYPES.find(t => t.id === id)?.label ?? id).join(', ')
-                : 'Specifikt sorts stöd?'}
+                : 'A specific kind of support?'}
             </Text>
             <FontAwesome5
               name={supportTypeExpanded ? 'chevron-up' : 'chevron-down'}
               size={11}
-              color="rgba(255,255,255,0.25)"
+              color={Palette.ink25}
             />
           </TouchableOpacity>
 
           {supportTypeExpanded && (
             <View style={s.expandContent}>
-              <Text style={s.expandHint}>Välj vilken sorts svar du önskar</Text>
+              <Text style={s.expandHint}>Choose what kind of response you'd like</Text>
               <View style={s.tagCloud}>
                 <TouchableOpacity
                   style={[s.chip, selectedTypes.length === 0 && s.chipActive]}
                   onPress={() => setSelectedTypes([])}
                   activeOpacity={0.75}
                 >
-                  <Text style={[s.chipText, selectedTypes.length === 0 && s.chipTextActive]}>Inget specifikt</Text>
+                  <Text style={[s.chipText, selectedTypes.length === 0 && s.chipTextActive]}>Nothing specific</Text>
                 </TouchableOpacity>
                 {SUPPORT_TYPES.map(t => {
                   const active = selectedTypes.includes(t.id);
@@ -296,39 +306,41 @@ export default function SupportStoryCreateScreen() {
           disabled={!canSubmit || submitting}
           activeOpacity={0.85}
         >
-          <Text style={s.submitText}>{submitting ? 'Lägger upp…' : 'Lägg upp'}</Text>
+          <Text style={s.submitText}>{submitting ? 'Posting…' : 'Post'}</Text>
         </TouchableOpacity>
+        {/* Gränsen sägs där man postar, inte först när förfrågan försvinner. */}
+        <Text style={s.lifetimeHint}>Your friends see it for 24 hours.</Text>
         </DismissKeyboardView>
       </ScrollView>
     </KeyboardAvoidingView>
   );
 }
 
-const s = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0f0f1a' },
+const makeS = (Palette: AppPalette) => StyleSheet.create({
+  container: { flex: 1, backgroundColor: 'transparent' },
   content: { padding: 24, paddingBottom: 60, gap: 40 },
   header: {
     flexDirection: 'row', alignItems: 'center',
     justifyContent: 'space-between', marginTop: 16,
   },
   backBtn: { width: 44, height: 44, justifyContent: 'center' },
-  title: { fontSize: 22, fontWeight: '700', color: '#ffffff', letterSpacing: 0.2 },
+  title: { fontSize: 22, fontWeight: '700', color: Palette.textPrimary, letterSpacing: 0.2 },
 
   section: { gap: 14 },
   sectionLabel: {
-    fontSize: 13, fontWeight: '500',
-    color: 'rgba(255,255,255,0.35)', letterSpacing: 0.3,
+    fontSize: 14, fontWeight: '500',
+    color: Palette.textSecondary, letterSpacing: 0.3,
   },
 
   chipRow: { gap: 8, paddingHorizontal: 2, paddingVertical: 4 },
   chip: {
     paddingHorizontal: 16, paddingVertical: 9, borderRadius: 22,
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
+    backgroundColor: Palette.ink05,
+    borderWidth: 1, borderColor: Palette.ink10,
   },
-  chipActive: { backgroundColor: 'rgba(162,155,254,0.15)', borderColor: '#a29bfe' },
-  chipText: { color: 'rgba(255,255,255,0.45)', fontSize: 13, fontWeight: '500' },
-  chipTextActive: { color: '#c4b5fd', fontWeight: '600' },
+  chipActive: { backgroundColor: Palette.communityTint, borderColor: Palette.community },
+  chipText: { color: Palette.ink45, fontSize: 14, fontWeight: '500' },
+  chipTextActive: { color: Palette.communitySoft, fontWeight: '600' },
 
   carouselContent: { gap: CARD_GAP, paddingHorizontal: 2, paddingVertical: 4 },
   carouselCard: {
@@ -336,27 +348,27 @@ const s = StyleSheet.create({
     paddingVertical: 14,
     paddingHorizontal: 6,
     borderRadius: 16,
-    backgroundColor: 'rgba(255,255,255,0.04)',
+    backgroundColor: Palette.ink04,
     borderWidth: 1.5,
-    borderColor: 'rgba(255,255,255,0.08)',
+    borderColor: Palette.ink08,
     alignItems: 'center',
     gap: 8,
   },
   carouselCardActive: {
-    backgroundColor: 'rgba(162,155,254,0.12)',
-    borderColor: '#a29bfe',
+    backgroundColor: alpha(Palette.community, 0.12),
+    borderColor: Palette.community,
   },
   carouselEmoji: { fontSize: 30, lineHeight: 38 },
   carouselLabel: {
-    fontSize: 9, color: 'rgba(255,255,255,0.35)',
+    fontSize: 11, color: Palette.ink35,
     letterSpacing: 0.5, textAlign: 'center',
   },
-  carouselLabelActive: { color: '#c4b5fd' },
+  carouselLabelActive: { color: Palette.communitySoft },
 
   backToCarouselBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 10,
   },
-  backToCarouselText: { color: '#a29bfe', fontSize: 12, fontWeight: '500' },
+  backToCarouselText: { color: Palette.community, fontSize: 13, fontWeight: '500' },
 
   freeInputRow: {
     flexDirection: 'row',
@@ -366,27 +378,27 @@ const s = StyleSheet.create({
   emojiInput: {
     width: 54,
     height: 54,
-    backgroundColor: 'rgba(255,255,255,0.05)',
+    backgroundColor: Palette.ink05,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
+    borderColor: Palette.ink10,
     fontSize: 26,
     textAlign: 'center',
-    color: '#ffffff',
+    color: Palette.textPrimary,
   },
   textInput: {
-    backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 12,
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
-    padding: 14, color: '#ffffff', fontSize: 14,
+    backgroundColor: Palette.ink05, borderRadius: 12,
+    borderWidth: 1, borderColor: Palette.ink10,
+    padding: 14, color: Palette.textPrimary, fontSize: 14,
   },
   noteInput: { minHeight: 64, textAlignVertical: 'top' },
   charCount: {
-    color: 'rgba(255,255,255,0.2)', fontSize: 11, textAlign: 'right', marginTop: 4,
+    color: Palette.ink20, fontSize: 12, textAlign: 'right', marginTop: 4,
   },
 
   expandSection: {
     borderTopWidth: 1,
-    borderTopColor: 'rgba(255,255,255,0.07)',
+    borderTopColor: Palette.ink07,
     paddingTop: 20,
   },
   expandToggle: {
@@ -396,8 +408,8 @@ const s = StyleSheet.create({
     paddingVertical: 4,
   },
   expandToggleText: {
-    fontSize: 13,
-    color: 'rgba(255,255,255,0.4)',
+    fontSize: 14,
+    color: Palette.ink40,
     fontWeight: '500',
   },
   expandContent: {
@@ -410,15 +422,16 @@ const s = StyleSheet.create({
     gap: 8,
   },
   expandHint: {
-    fontSize: 12,
-    color: 'rgba(255,255,255,0.25)',
+    fontSize: 13,
+    color: Palette.ink25,
     letterSpacing: 0.2,
   },
 
   submitBtn: {
-    backgroundColor: '#a29bfe', paddingVertical: 16,
+    backgroundColor: Palette.community, paddingVertical: 16,
     borderRadius: 32, alignItems: 'center', marginTop: 8,
   },
-  submitBtnDisabled: { backgroundColor: 'rgba(162,155,254,0.2)' },
-  submitText: { color: '#fff', fontSize: 16, fontWeight: '700', letterSpacing: 0.3 },
+  submitBtnDisabled: { backgroundColor: alpha(Palette.community, 0.2) },
+  submitText: { color: Palette.onAccent, fontSize: 16, fontWeight: '700', letterSpacing: 0.3 },
+  lifetimeHint: { color: Palette.textTertiary, fontSize: 13, lineHeight: 18, textAlign: 'center', marginTop: 10 },
 });

@@ -13,7 +13,9 @@ export type SessionPhase =
 
 export type Side = 'left' | 'right';
 
-export type PauseType = 'session' | 'regulate';
+// 'sleep' är en natt (lib/sleep.ts): samma faser och samma frysning vid
+// lyft, men den sparas som `kind = 'sleep'` och räknas aldrig som en paus.
+export type PauseType = 'session' | 'regulate' | 'sleep';
 
 export interface SessionEndedInfo {
   seq: string;
@@ -29,6 +31,7 @@ export interface SessionState {
   targetSeconds?: number;      // bara relevant för lådlös 'regulate'
   category?: string;
   sharedSessionId?: string;
+  sharedWithName?: string;
   /** epoch ms – ankare för hur mycket tid som har gått i aktuell fas */
   startedAt: number | null;
   /** epoch ms – när respiten började, så att elapsed kan frysas korrekt */
@@ -37,7 +40,6 @@ export interface SessionState {
   elapsedBaselineMs: number;
   /** total tid tillbringad i respite hittills — dras av så att elapsed hoppar inte fram när pausen återupptas */
   pausedMs: number;
-  touches: { left: boolean; right: boolean };
   lastEnded: SessionEndedInfo | null;
 }
 
@@ -49,22 +51,25 @@ export const initialSessionState: SessionState = {
   targetSeconds: undefined,
   category: undefined,
   sharedSessionId: undefined,
+  sharedWithName: undefined,
   startedAt: null,
   respiteStartedAt: null,
   elapsedBaselineMs: 0,
   pausedMs: 0,
-  touches: { left: false, right: false },
   lastEnded: null,
 };
 
 export type SessionEvent =
   | { type: 'ENTER_CHECKIN'; category?: string; sharedSessionId?: string }
-  | { type: 'TOUCH_BEGIN'; side: Side }
-  | { type: 'TOUCH_END'; side: Side }
   | { type: 'CHECKIN_COMPLETE' }
   | { type: 'PHONE_DOWN' }
   | { type: 'LID_CLOSED' }
   | { type: 'LID_OPENED' }
+  /** Lådlöst: telefonen är inte längre nedåtvänd — klockan fryser. Locket är
+   *  lådans vila, skärmen nedåt är den lådlösa motsvarigheten, så båda landar
+   *  i samma 'respite'-fas och samma pausedMs-bokföring. */
+  | { type: 'PHONE_LIFTED' }
+  | { type: 'PHONE_RESTED' }
   | {
       // För lådflödet skickar box_message bara `seq` — kategori/delad-session
       // sattes redan av ENTER_CHECKIN och behålls. Det lådlösa flödet anger
@@ -76,6 +81,7 @@ export type SessionEvent =
       targetSeconds?: number;
       category?: string;
       sharedSessionId?: string;
+      sharedWithName?: string;
     }
   | { type: 'SESSION_ENDED'; seq: string; durationMs: number; completed: boolean }
   /** Box skickar sitt aktuella tillstånd direkt efter anslutning — hoppar rakt in, förbi normala övergångar. */
@@ -85,22 +91,16 @@ export type SessionEvent =
 export function sessionReducer(state: SessionState, event: SessionEvent): SessionState {
   switch (event.type) {
     case 'ENTER_CHECKIN':
+      // Namnet är kvar av historiska skäl — i v6 börjar ritualen med att
+      // vänta på att telefonen ställs i lådan, inte med tumincheckningen.
       if (state.phase !== 'idle') return state;
       return {
         ...initialSessionState,
-        phase: 'checking_in',
+        phase: 'awaiting_lid',
         withPod: true,
         category: event.category,
         sharedSessionId: event.sharedSessionId,
       };
-
-    case 'TOUCH_BEGIN':
-      if (state.phase !== 'checking_in') return state;
-      return { ...state, touches: { ...state.touches, [event.side]: true } };
-
-    case 'TOUCH_END':
-      if (state.phase !== 'checking_in') return state;
-      return { ...state, touches: { ...state.touches, [event.side]: false } };
 
     case 'CHECKIN_COMPLETE':
       if (state.phase !== 'checking_in') return state;
@@ -125,11 +125,47 @@ export function sessionReducer(state: SessionState, event: SessionEvent): Sessio
           pausedMs: state.pausedMs + justPausedMs,
         };
       }
+      // Locket stängs efter att telefonen lagts ner — nu väntar lådan på tummarna.
+      if (state.phase === 'awaiting_lid' && state.withPod) {
+        return { ...state, phase: 'checking_in' };
+      }
       return state;
 
     case 'LID_OPENED':
-      if (state.phase !== 'active' || !state.withPod) return state;
+      // 'checked_in' räknas med: lådans sessionRunning() omfattar CHECKED_IN
+      // (startceremonin, ~8,4 s med klockan igång), så ett lock som öppnas
+      // där sätter lådan i RESPITE. Speglade appen inte det blev faserna
+      // permanent osynkade — appen stod kvar i 'checked_in' och förstod
+      // sedan varken lock- eller lyft-händelser.
+      if (!state.withPod) return state;
+      // Locket öppnat innan tummarna hann hålla färdigt: ingen session har
+      // börjat, och försöket är inte förbrukat. Lådan går tillbaka till
+      // AWAITING_LID (CLOSE BOX) i samma läge, så appen gör detsamma —
+      // skärmen står kvar på CLOSE THE LID och lock-timern räknas om från
+      // noll, precis som lådans AWAIT_LID_MAX_MS gör.
+      if (state.phase === 'checking_in') {
+        return { ...state, phase: 'awaiting_lid' };
+      }
+      if (state.phase !== 'active' && state.phase !== 'checked_in') return state;
       return { ...state, phase: 'respite', respiteStartedAt: Date.now() };
+
+    // withPod-kontrollen är spegelvänd mot lock-händelserna: en ansluten
+    // låda äger sin egen vila via locket och ska aldrig kunna frysas av
+    // telefonens läge, och tvärtom.
+    case 'PHONE_LIFTED':
+      if (state.phase !== 'active' || state.withPod) return state;
+      return { ...state, phase: 'respite', respiteStartedAt: Date.now() };
+
+    case 'PHONE_RESTED': {
+      if (state.phase !== 'respite' || state.withPod) return state;
+      const justPausedMs = state.respiteStartedAt ? Date.now() - state.respiteStartedAt : 0;
+      return {
+        ...state,
+        phase: 'active',
+        respiteStartedAt: null,
+        pausedMs: state.pausedMs + justPausedMs,
+      };
+    }
 
     case 'SESSION_STARTED':
       return {
@@ -141,6 +177,7 @@ export function sessionReducer(state: SessionState, event: SessionEvent): Sessio
         targetSeconds: event.targetSeconds ?? state.targetSeconds,
         category: event.category ?? state.category,
         sharedSessionId: event.sharedSessionId ?? state.sharedSessionId,
+        sharedWithName: event.sharedWithName ?? state.sharedWithName,
         startedAt: Date.now(),
         elapsedBaselineMs: 0,
         pausedMs: 0,

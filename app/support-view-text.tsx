@@ -1,11 +1,37 @@
 import { FontAwesome5 } from '@expo/vector-icons';
 import { router } from 'expo-router';
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { Animated, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { openPauseStart } from '../lib/pauseFlow';
 import { supabase } from '../lib/supabase';
 import { clearPending, getPending } from '../lib/supportQueue';
+import { AppPalette, alpha } from '../constants/appTheme';
+import { RoomProvider, usePalette } from '../contexts/ThemeContext';
+import { roomShell, ScreenBackground } from '../components/screen-background';
 
-export default function SupportViewTextScreen() {
+/**
+ * Hör till **friends-rummet**. Rummet följer ärendet och inte filträdet — se
+ * ROOMS i [constants/appTheme.ts](../constants/appTheme.ts). Skalet är
+ * identiskt med de andra rummens: en komponent kan inte läsa sin egen
+ * provider, och en bakgrund i skalet täcker varje gren skärmen returnerar.
+ */
+export default function SupportViewTextRoom() {
+  return (
+    <RoomProvider room="friends">
+      <View style={roomShell}>
+        <ScreenBackground room="friends" />
+        <SupportViewTextScreen />
+      </View>
+    </RoomProvider>
+  );
+}
+
+function SupportViewTextScreen() {
+  const Palette = usePalette();
+  const s = useMemo(() => makeS(Palette), [Palette]);
+  const insets = useSafeAreaInsets();
+  const closeTop = { top: Math.max(56, insets.top + 4) };
   const pending = getPending();
   const fadeAnim = useRef(new Animated.Value(0)).current;
 
@@ -28,14 +54,14 @@ export default function SupportViewTextScreen() {
 
   const handlePause = () => {
     clearPending();
-    router.push('/pause');
+    openPauseStart('push');
   };
 
   if (!pending || pending.responseType !== 'text') {
     return (
       <View style={s.container}>
-        <TouchableOpacity onPress={handleClose} style={s.closeBtn}>
-          <FontAwesome5 name="times" size={18} color="rgba(255,255,255,0.4)" />
+        <TouchableOpacity onPress={handleClose} style={[s.closeBtn, closeTop]}>
+          <FontAwesome5 name="times" size={18} color={Palette.ink40} />
         </TouchableOpacity>
         <Text style={s.fallback}>Inget meddelande att visa.</Text>
       </View>
@@ -44,8 +70,8 @@ export default function SupportViewTextScreen() {
 
   return (
     <View style={s.container}>
-      <TouchableOpacity onPress={handleClose} style={s.closeBtn} activeOpacity={0.7}>
-        <FontAwesome5 name="times" size={18} color="rgba(255,255,255,0.4)" />
+      <TouchableOpacity onPress={handleClose} style={[s.closeBtn, closeTop]} activeOpacity={0.7}>
+        <FontAwesome5 name="times" size={18} color={Palette.ink40} />
       </TouchableOpacity>
 
       <Animated.View style={[s.content, { opacity: fadeAnim }]}>
@@ -59,12 +85,12 @@ export default function SupportViewTextScreen() {
         </View>
 
         <View style={s.messageCard}>
-          <Text style={s.messageLabel}>PEPP</Text>
+          <Text style={s.messageLabel}>SUPPORT</Text>
           <Text style={s.messageText}>{pending.textContent}</Text>
         </View>
 
         <TouchableOpacity style={s.pauseBtn} onPress={handlePause} activeOpacity={0.85}>
-          <FontAwesome5 name="pause" size={14} color="#fff" />
+          <FontAwesome5 name="pause" size={14} color={Palette.onAccent} />
           <Text style={s.pauseBtnText}>Ta en paus nu</Text>
         </TouchableOpacity>
 
@@ -76,9 +102,9 @@ export default function SupportViewTextScreen() {
   );
 }
 
-const s = StyleSheet.create({
+const makeS = (Palette: AppPalette) => StyleSheet.create({
   container: {
-    flex: 1, backgroundColor: '#0f0f1a',
+    flex: 1, backgroundColor: 'transparent',
     alignItems: 'center', justifyContent: 'center',
     padding: 32,
   },
@@ -90,29 +116,29 @@ const s = StyleSheet.create({
   senderRow: { alignItems: 'center', gap: 12 },
   senderAvatar: {
     width: 72, height: 72, borderRadius: 36,
-    backgroundColor: 'rgba(162,155,254,0.15)',
-    borderWidth: 1.5, borderColor: '#a29bfe',
+    backgroundColor: Palette.communityTint,
+    borderWidth: 1.5, borderColor: Palette.community,
     alignItems: 'center', justifyContent: 'center',
   },
-  senderAvatarText: { fontSize: 28, fontWeight: '700', color: '#c4b5fd' },
-  senderName: { fontSize: 22, fontWeight: '700', color: '#ffffff', letterSpacing: 0.2 },
+  senderAvatarText: { fontSize: 28, fontWeight: '700', color: Palette.communitySoft },
+  senderName: { fontSize: 22, fontWeight: '700', color: Palette.textPrimary, letterSpacing: 0.2 },
   messageCard: {
-    width: '100%', backgroundColor: 'rgba(162,155,254,0.07)',
-    borderRadius: 20, borderWidth: 1, borderColor: 'rgba(162,155,254,0.2)',
+    width: '100%', backgroundColor: alpha(Palette.community, 0.07),
+    borderRadius: 20, borderWidth: 1, borderColor: alpha(Palette.community, 0.2),
     padding: 24, gap: 12,
   },
   messageLabel: {
-    fontSize: 10, fontWeight: '700', color: '#a29bfe', letterSpacing: 3,
+    fontSize: 12, fontWeight: '700', color: Palette.community, letterSpacing: 3,
   },
-  messageText: { fontSize: 20, color: '#ffffff', lineHeight: 30, fontWeight: '500' },
+  messageText: { fontSize: 20, color: Palette.textPrimary, lineHeight: 30, fontWeight: '500' },
   pauseBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
-    backgroundColor: '#a29bfe', paddingVertical: 16, paddingHorizontal: 40,
+    backgroundColor: Palette.community, paddingVertical: 16, paddingHorizontal: 40,
     borderRadius: 32, width: '100%', justifyContent: 'center',
-    shadowColor: '#a29bfe', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.35, shadowRadius: 12, elevation: 6,
+    shadowColor: Palette.community, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.35, shadowRadius: 12, elevation: 6,
   },
-  pauseBtnText: { color: '#fff', fontSize: 16, fontWeight: '700', letterSpacing: 0.3 },
+  pauseBtnText: { color: Palette.onAccent, fontSize: 16, fontWeight: '700', letterSpacing: 0.3 },
   laterBtn: { paddingVertical: 8 },
-  laterBtnText: { color: 'rgba(255,255,255,0.3)', fontSize: 14, letterSpacing: 0.2 },
-  fallback: { color: 'rgba(255,255,255,0.3)', fontSize: 15 },
+  laterBtnText: { color: Palette.ink30, fontSize: 14, letterSpacing: 0.2 },
+  fallback: { color: Palette.ink30, fontSize: 15 },
 });

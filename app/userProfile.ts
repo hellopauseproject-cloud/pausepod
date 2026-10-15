@@ -1,16 +1,19 @@
-import * as FileSystem from 'expo-file-system/legacy';
+import { readDoc, writeDoc } from '../lib/docStore';
 
-const PROFILE_PATH = FileSystem.documentDirectory + 'userProfile.json';
+// Filnamnet är oförändrat: på native skrivs samma fil på samma plats som förr,
+// så befintliga installationer hittar sin profil. Se lib/docStore.ts för varför
+// läsningen och skrivningen går via en omväg.
+const PROFILE_DOC = 'userProfile.json';
 
 export const saveProfile = async (name: string, photoUri: string | null) => {
-  await FileSystem.writeAsStringAsync(PROFILE_PATH, JSON.stringify({ name, photoUri }));
+  await writeDoc(PROFILE_DOC, JSON.stringify({ name, photoUri }));
 };
 
 export const getProfile = async (): Promise<{ name: string; photoUri: string | null }> => {
   try {
-    const data = await FileSystem.readAsStringAsync(PROFILE_PATH);
+    const data = await readDoc(PROFILE_DOC);
     return JSON.parse(data);
   } catch (e) {
-    return { name: 'Dig själv', photoUri: null };
+    return { name: 'Yourself', photoUri: null };
   }
 };

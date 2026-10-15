@@ -1,15 +1,74 @@
 import { FontAwesome, MaterialIcons } from '@expo/vector-icons';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Alert, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { useBLEControl } from '../context/BLEContext';
-import { Category, getAllCategories, getSelectedCategories } from './pauseLogger';
+import { useBLE, useBLEControl } from '../context/BLEContext';
+import { HoldToStartButton } from '../components/hold-to-start-button';
+import { roomShell, ScreenBackground } from '../components/screen-background';
+import { AppPalette, Radius, Spacing } from '../constants/appTheme';
+import { RoomProvider, usePalette } from '../contexts/ThemeContext';
+import { track } from '../lib/analytics';
+import { HOLD_TO_START_MS } from '../lib/pauseFlow';
+import { Category, getSelectedCategories } from './pauseLogger';
 
 type PauseMode = 'med-låda' | 'utan-låda' | null;
 
-const DURATIONS = [5, 10, 15, 20, 25, 30];
+/**
+ * Lådan är inte ute ännu, så dess läge går inte att välja.
+ *
+ * **Allt bakom knappen står kvar orört** — `sendSetMode`, BLE-kollen,
+ * routningen till `/placeinbox`, hela `med-låda`-grenen i `handleCheckIn`.
+ * Det enda som ändras är att knappen inte går att trycka på och att den säger
+ * varför. Sätt den här till `false` och lådläget är tillbaka i exakt samma
+ * skick som förut; det är hela avsikten med att det är en konstant och inte
+ * en bortkommenterad gren.
+ *
+ * Knappen döljs alltså inte heller. Att lådan finns är en del av vad appen
+ * är — introduktionens lådsteg står kvar av samma skäl — och en knapp som
+ * säger COMING SOON berättar det, medan en borttagen knapp bara gör
+ * valskärmen till ett val mellan en sak.
+ */
+const POD_COMING_SOON = true;
 
-export default function PauseScreen() {
+/**
+ * CHECK IN måste hållas in i `HOLD_TO_START_MS` innan pausen startar. Ett
+ * startat tryck är det enda i appen som sätter igång något man inte ångrar
+ * med ett tryck till, och ett avsiktligt håll skiljer det från ett snuddat.
+ * `false` ger tillbaka det vanliga trycket — båda vägarna anropar samma
+ * `handleCheckIn`, och ingenting i den (BLE, `set_mode`, routningen) rörs av
+ * valet. Se components/hold-to-start-button.tsx.
+ */
+const HOLD_TO_START = true;
+// Hålltiden bor i lib/pauseFlow.ts, delad med PAUSE på Hem.
+
+/**
+ * Valskärmen hör till **Pause-rummet**, trots att den ligger utanför
+ * `app/(tabs)/`.
+ *
+ * Den nås av PAUSE-knappen på Hem och är samma handling fortsatt ett steg, så
+ * den ska se ut som skärmen man kom från — utan rummet låg den på basens
+ * plommonbotten och bytte kulör mitt i ett tryck. Rummet är alltså inte bundet
+ * till flikgruppen utan till *vad skärmen handlar om*; ligger nästa skärm i en
+ * annan flikfamilj men samma ärende hör den hit också.
+ *
+ * Skalet är identiskt med `HomeRoom` i [app/(tabs)/index.tsx](app/(tabs)/index.tsx),
+ * av samma två skäl: en komponent kan inte läsa sin egen provider, och en
+ * bakgrund i skalet täcker varje gren skärmen kan returnera.
+ */
+export default function PauseRoom() {
+  return (
+    <RoomProvider room="pause">
+      <View style={roomShell}>
+        <ScreenBackground room="pause" />
+        <PauseScreen />
+      </View>
+    </RoomProvider>
+  );
+}
+
+function PauseScreen() {
+  const Palette = usePalette();
+  const styles = useMemo(() => makeStyles(Palette), [Palette]);
   const { sharedSessionId, sharedWithName } = useLocalSearchParams<{
     sharedSessionId?: string;
     sharedWithName?: string;
@@ -17,33 +76,58 @@ export default function PauseScreen() {
 
   const [categories, setCategories] = useState<Category[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
-  const [selectedMode, setSelectedMode] = useState<PauseMode>(null);
-  const [selection, setSelection] = useState<number | 'free' | null>(null);
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [allCategories, setAllCategories] = useState<Category[]>([]);
+  // Med lådan utom räckhåll är "utan låda" inte ett val längre utan det enda
+  // läget, och då ska skärmen inte kräva ett tryck för att komma igång: CHECK IN
+  // står annars död tills man valt det som ändå var givet.
+  //
+  // Förvalet hänger därför på POD_COMING_SOON och är inte skrivet rakt ut. Släcks
+  // konstanten är båda lägena valbara igen, och då måste skärmen vara neutral — ett
+  // förval på det ena hade gjort valet till en knuff, och konstantens löfte om att
+  // allt är tillbaka i exakt samma skick hade brutits här utan att något felar.
+  const [selectedMode, setSelectedMode] = useState<PauseMode>(POD_COMING_SOON ? 'utan-låda' : null);
+  const [showHelpModal, setShowHelpModal] = useState(false);
   const { isConnected } = useBLEControl();
+  const { sendSetMode } = useBLE();
 
+  // Tom lista betyder "medvetet tömd i Settings" och inte "aldrig vald" —
+  // standardgrenen sitter i getSelectedCategories() och ger hela
+  // uppsättningen till den som aldrig rört saken. Se CLAUDE.md.
   useEffect(() => {
     getSelectedCategories().then(setCategories);
-    getAllCategories().then(setAllCategories);
   }, []);
 
-  const canCheckIn = selectedMode === 'med-låda' || (selectedMode === 'utan-låda' && selection !== null);
+  const canCheckIn = selectedMode !== null;
 
   const handleCheckIn = () => {
     if (!canCheckIn) return;
 
     if (selectedMode === 'med-låda' && !isConnected) {
+      // Trattens första bortfall, och det enda som inte lämnar något spår
+      // alls i pause_sessions: hen ville pausa med lådan och kom aldrig
+      // längre än till varningen.
+      track('pause_blocked_box_offline', { category: selectedCategory ?? null });
       Alert.alert(
-        'PAUSE POD ej ansluten',
-        'Kontrollera att Bluetooth är påslaget på din telefon och att lådan är inom räckhåll.',
+        'PAUSE POD not connected',
+        'Check that Bluetooth is turned on on your phone and that the box is within range.',
         [{ text: 'OK' }]
       );
       return;
     }
 
+    // Trattens ingång. `with_pod` är hela skälet att händelsen finns: de två
+    // flödena faller ifrån på helt olika ställen, och i pause_sessions syns
+    // bara de försök som faktiskt blev en paus.
+    track('pause_mode_selected', {
+      with_pod: selectedMode === 'med-låda',
+      category: selectedCategory ?? null,
+      shared: !!(sharedSessionId && sharedWithName),
+    });
+
     if (selectedMode === 'med-låda') {
-      // Ingen vald längd med låda — lådan äger start/slut, appen registrerar bara.
+      // Ingen vald längd med låda ännu — UP:0 tills en längdväljare finns.
+      // Lådan parsar inte innehållet idag, men formatet ligger på plats.
+      sendSetMode('session', 'UP', 0).catch(() => {});
+
       const base = {
         mode: 'session',
         category: selectedCategory ?? '',
@@ -54,18 +138,17 @@ export default function PauseScreen() {
       if (sharedSessionId && sharedWithName) {
         router.push({ pathname: '/pausing', params: { ...base, sharedSessionId, sharedWithName } });
       } else {
-        router.push({ pathname: '/placeinbox', params: { category: selectedCategory ?? '', withPod: 'true' } });
+        router.push({ pathname: '/placeinbox', params: base });
       }
       return;
     }
 
-    const isRegulate = typeof selection === 'number';
     const base = {
       mode: 'session',
       category: selectedCategory ?? '',
       withPod: 'false',
-      pauseType: isRegulate ? 'regulate' : 'session',
-      targetSeconds: isRegulate ? String((selection as number) * 60) : '0',
+      pauseType: 'session',
+      targetSeconds: '0',
     };
 
     if (sharedSessionId && sharedWithName) {
@@ -77,75 +160,58 @@ export default function PauseScreen() {
 
   return (
     <View style={styles.container}>
-      <FontAwesome name="pause" size={40} color="#2e86de" />
-      <Text style={styles.title}>Starta paus</Text>
+      <FontAwesome name="pause" size={40} color={Palette.hue} />
+      <Text style={styles.title}>Start pause</Text>
 
-      {/* ── SKAPA SESSION ──────────────────────── */}
-      {/* Med låda finns ingen vald längd — lådan har inget tak och räknar uppåt. */}
-      {selectedMode !== 'med-låda' && (
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>SKAPA SESSION</Text>
-
-          <TouchableOpacity
-            style={[styles.freeTimeBtn, selection === 'free' && styles.freeTimeBtnSelected]}
-            onPress={() => setSelection(selection === 'free' ? null : 'free')}
-            activeOpacity={0.8}
-          >
-            <Text style={[styles.freeTimeText, selection === 'free' && styles.freeTimeTextSelected]}>
-              FRI TID
-            </Text>
-            {selection === 'free' && (
-              <View style={styles.freeCheckDot}>
-                <FontAwesome name="check" size={9} color="white" />
-              </View>
-            )}
-          </TouchableOpacity>
-
-          <Text style={styles.orLabel}>ELLER VÄLJ TID</Text>
-
-          <View style={styles.durationGrid}>
-            {DURATIONS.map(min => (
-              <TouchableOpacity
-                key={min}
-                style={[styles.durationChip, selection === min && styles.durationChipSelected]}
-                onPress={() => setSelection(selection === min ? null : min)}
-                activeOpacity={0.75}
-              >
-                <Text style={[styles.durationNum, selection === min && styles.durationNumSelected]}>
-                  {min}
-                </Text>
-                <Text style={[styles.durationUnit, selection === min && styles.durationUnitSelected]}>
-                  min
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
-      )}
-
-      {/* ── VÄLJ LÄGE ──────────────────────────── */}
+      {/* ── CHOOSE MODE ──────────────────────────── */}
       <View style={styles.section}>
-        <Text style={styles.sectionLabel}>VÄLJ LÄGE</Text>
+        <Text style={styles.sectionLabel}>CHOOSE MODE</Text>
         <View style={styles.modeRow}>
           <TouchableOpacity
-            style={[styles.modeButton, selectedMode === 'med-låda' && styles.modeButtonSelected]}
+            style={[
+              styles.modeButton,
+              selectedMode === 'med-låda' && styles.modeButtonSelected,
+              POD_COMING_SOON && styles.modeButtonSoon,
+            ]}
+            disabled={POD_COMING_SOON}
+            accessibilityState={{ disabled: POD_COMING_SOON }}
             onPress={() => setSelectedMode(selectedMode === 'med-låda' ? null : 'med-låda')}
           >
             <MaterialIcons
               name="pause-presentation"
               size={38}
-              color={selectedMode === 'med-låda' ? '#2e86de' : '#555'}
+              color={
+                POD_COMING_SOON
+                  ? Palette.textDisabled
+                  : selectedMode === 'med-låda' ? Palette.hue : Palette.textFaint
+              }
             />
-            <Text style={[styles.modeTitle, selectedMode === 'med-låda' && styles.modeTitleSelected]}>
-              MED PAUSE POD
+            <Text
+              style={[
+                styles.modeTitle,
+                selectedMode === 'med-låda' && styles.modeTitleSelected,
+                POD_COMING_SOON && styles.modeTitleSoon,
+              ]}
+            >
+              WITH PAUSE POD
             </Text>
-            <View style={[styles.bleRow, { opacity: selectedMode === 'med-låda' ? 1 : 0.3 }]}>
-              <View style={[styles.bleDot, { backgroundColor: isConnected ? '#27ae60' : '#ffffff' }]} />
-              <Text style={styles.bleSmallText}>{isConnected ? 'Redo' : 'Anslut'}</Text>
-            </View>
-            {selectedMode === 'med-låda' && (
+            {/* Anslutningsraden säger ingenting medan läget inte går att
+                välja — "Connect" hade varit en uppmaning att göra något som
+                inte leder någonstans. Den byts mot skälet, inte mot tomrum:
+                en nedtonad knapp utan förklaring läser som trasig. */}
+            {POD_COMING_SOON ? (
+              <View style={styles.bleRow}>
+                <Text style={styles.soonText}>COMING SOON</Text>
+              </View>
+            ) : (
+              <View style={[styles.bleRow, { opacity: selectedMode === 'med-låda' ? 1 : 0.3 }]}>
+                <View style={[styles.bleDot, { backgroundColor: isConnected ? Palette.success : Palette.textPrimary }]} />
+                <Text style={styles.bleSmallText}>{isConnected ? 'Ready' : 'Connect'}</Text>
+              </View>
+            )}
+            {selectedMode === 'med-låda' && !POD_COMING_SOON && (
               <View style={styles.checkDot}>
-                <FontAwesome name="check" size={10} color="white" />
+                <FontAwesome name="check" size={10} color={Palette.onAccent} />
               </View>
             )}
           </TouchableOpacity>
@@ -157,17 +223,17 @@ export default function PauseScreen() {
             <MaterialIcons
               name="cancel-presentation"
               size={38}
-              color={selectedMode === 'utan-låda' ? '#2e86de' : '#555'}
+              color={selectedMode === 'utan-låda' ? Palette.hue : Palette.textFaint}
             />
             <Text style={[styles.modeTitle, selectedMode === 'utan-låda' && styles.modeTitleSelected]}>
-              UTAN PAUSE POD
+              WITHOUT PAUSE POD
             </Text>
             <View style={[styles.bleRow, { opacity: selectedMode === 'utan-låda' ? 1 : 0.3 }]}>
-              <Text style={styles.bleSmallText}>Var som helst</Text>
+              <Text style={styles.bleSmallText}>Anywhere</Text>
             </View>
             {selectedMode === 'utan-låda' && (
               <View style={styles.checkDot}>
-                <FontAwesome name="check" size={10} color="white" />
+                <FontAwesome name="check" size={10} color={Palette.onAccent} />
               </View>
             )}
           </TouchableOpacity>
@@ -176,10 +242,25 @@ export default function PauseScreen() {
 
       {/* ── KATEGORI ───────────────────────────── */}
       <View style={styles.section}>
+        {/* Knappen var ett plus som öppnade en lista att lägga till ur, och
+            den slutade fungera den dagen introduktionens kategoristeg revs:
+            den som aldrig valt får numera hela uppsättningen framme, och
+            plusets lista stod då tom med "All intentions have already been
+            added." Tillägget sparades dessutom aldrig — nästa paus började om
+            från samma rad.
+
+            Frågetecknet säger i stället var valet faktiskt bor. Priset är att
+            den som smalnat av sin lista i Settings inte längre kan plocka in
+            en aktivitet bara för idag; vägen dit går via Settings och håller i
+            stället. */}
         <View style={styles.sectionLabelRow}>
-          <Text style={styles.sectionLabel}>VAD SKA DU GÖRA? (VALFRITT)</Text>
-          <TouchableOpacity style={styles.addIntentionBtn} onPress={() => setShowAddModal(true)}>
-            <MaterialIcons name="add" size={16} color="#555" />
+          <Text style={styles.sectionLabel}>WHAT WILL YOU DO? (OPTIONAL)</Text>
+          <TouchableOpacity
+            style={styles.addIntentionBtn}
+            onPress={() => setShowHelpModal(true)}
+            accessibilityLabel="About your intentions"
+          >
+            <MaterialIcons name="question-mark" size={14} color={Palette.textFaint} />
           </TouchableOpacity>
         </View>
         {categories.length > 0 && (
@@ -205,200 +286,144 @@ export default function PauseScreen() {
       </View>
 
       {/* ── Modal ──────────────────────────────── */}
-      <Modal transparent animationType="fade" visible={showAddModal} onRequestClose={() => setShowAddModal(false)}>
-        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setShowAddModal(false)}>
+      <Modal transparent animationType="fade" visible={showHelpModal} onRequestClose={() => setShowHelpModal(false)}>
+        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setShowHelpModal(false)}>
           <TouchableOpacity activeOpacity={1} style={styles.addModalBox}>
-            <Text style={styles.addModalTitle}>LÄGG TILL INTENTION</Text>
-            <View style={styles.addModalGrid}>
-              {allCategories
-                .filter(cat => !categories.find(c => c.id === cat.id))
-                .map(cat => (
-                  <TouchableOpacity
-                    key={cat.id}
-                    style={styles.addModalChip}
-                    onPress={() => {
-                      setCategories(prev => [...prev, cat]);
-                      setSelectedCategory(cat.id);
-                      setShowAddModal(false);
-                    }}
-                  >
-                    <Text style={styles.addModalEmoji}>{cat.emoji}</Text>
-                    <Text style={styles.addModalLabel}>{cat.label}</Text>
-                  </TouchableOpacity>
-                ))}
-            </View>
-            {allCategories.filter(cat => !categories.find(c => c.id === cat.id)).length === 0 && (
-              <Text style={styles.addModalEmpty}>Alla intentioner är redan tillagda.</Text>
-            )}
+            <Text style={styles.addModalTitle}>YOUR INTENTIONS</Text>
+            <Text style={styles.helpBody}>
+              Tag a pause with what you&apos;re doing, and it&apos;s shown in your stats. Customize them in Settings.
+            </Text>
+            <TouchableOpacity
+              style={styles.helpBtn}
+              onPress={() => {
+                setShowHelpModal(false);
+                // Settings bor i app/onboarding.tsx trots filnamnet — se
+                // CLAUDE.md. push och inte replace: pausvalet ovanför ska
+                // stå kvar när man backar tillbaka hit.
+                router.push('/onboarding');
+              }}
+            >
+              <Text style={styles.helpBtnText}>GO TO SETTINGS</Text>
+            </TouchableOpacity>
           </TouchableOpacity>
         </TouchableOpacity>
       </Modal>
 
       {/* ── Checka in ──────────────────────────── */}
-      <TouchableOpacity
-        style={[styles.checkInButton, !canCheckIn && styles.checkInButtonDisabled]}
-        onPress={handleCheckIn}
-        disabled={!canCheckIn}
-      >
-        <FontAwesome name="check" size={18} color="white" style={{ marginRight: 10 }} />
-        <Text style={styles.checkInText}>CHECKA IN</Text>
-      </TouchableOpacity>
+      {/* Samma `handleCheckIn` i båda grenarna — det är bara gesten som
+          skiljer. `HOLD_TO_START` högst upp växlar tillbaka till ett vanligt
+          tryck. */}
+      {HOLD_TO_START ? (
+        <HoldToStartButton
+          style={[styles.checkInButton, !canCheckIn && styles.checkInButtonDisabled]}
+          onComplete={handleCheckIn}
+          holdMs={HOLD_TO_START_MS}
+          disabled={!canCheckIn}
+          borderRadius={Radius.pill}
+          accessibilityLabel="Check in"
+          hintStyle={styles.holdHint}
+        >
+          <FontAwesome name="check" size={18} color={Palette.onAccent} style={{ marginRight: 10 }} />
+          <Text style={styles.checkInText}>CHECK IN</Text>
+        </HoldToStartButton>
+      ) : (
+        <TouchableOpacity
+          style={[styles.checkInButton, !canCheckIn && styles.checkInButtonDisabled]}
+          onPress={handleCheckIn}
+          disabled={!canCheckIn}
+        >
+          <FontAwesome name="check" size={18} color={Palette.onAccent} style={{ marginRight: 10 }} />
+          <Text style={styles.checkInText}>CHECK IN</Text>
+        </TouchableOpacity>
+      )}
 
       <TouchableOpacity style={styles.noButton} onPress={() => router.back()}>
-        <Text style={styles.noText}>Inte nu</Text>
+        <Text style={styles.noText}>Not now</Text>
       </TouchableOpacity>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (Palette: AppPalette) => StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#1a1a2e',
+    // Botten ritas av <ScreenBackground> i skalet ovan. Stod färgen kvar här
+    // hade den lagt sig ovanpå de fyra lagren.
+    backgroundColor: 'transparent',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 20,
-    padding: 28,
+    gap: Spacing.lg,
+    padding: Spacing.xl,
     marginTop: -15,
   },
   title: {
     fontSize: 32,
-    fontWeight: 'bold',
-    color: 'white',
+    fontWeight: '800',
+    color: Palette.textPrimary,
     marginTop: -15,
   },
   section: { width: '100%' },
-  sectionLabel: {
-    color: '#555',
-    fontSize: 11,
-    fontWeight: 'bold',
-    letterSpacing: 2,
-    marginBottom: 12,
-  },
-
-  // ── Or label ──────────────────────────────
-  orLabel: {
-    color: '#333',
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 2,
-    textAlign: 'center',
-    marginTop: 14,
-    marginBottom: 10,
-  },
-
-  // ── Duration grid ─────────────────────────
-  durationGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-    justifyContent: 'space-between',
-  },
-  durationChip: {
-    width: '30%',
-    paddingVertical: 9,
-    backgroundColor: '#2a2a3e',
-    borderRadius: 11,
-    borderWidth: 1.5,
-    borderColor: '#2a2a3e',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  durationChipSelected: {
-    borderColor: '#2e86de',
-    backgroundColor: '#1a3a5e',
-  },
-  durationNum: {
-    color: '#666',
-    fontSize: 16,
-    fontWeight: '700',
-    lineHeight: 20,
-  },
-  durationNumSelected: { color: '#fff' },
-  durationUnit: {
-    color: '#444',
-    fontSize: 10,
-    fontWeight: '600',
-    letterSpacing: 1.5,
-    marginTop: 1,
-  },
-  durationUnitSelected: { color: '#7ab8f5' },
-
-  // ── Free time button ──────────────────────
-  freeTimeBtn: {
-    marginTop: 10,
-    width: '100%',
-    paddingVertical: 14,
-    backgroundColor: '#2a2a3e',
-    borderRadius: 14,
-    borderWidth: 1.5,
-    borderColor: '#2a2a3e',
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexDirection: 'row',
-    position: 'relative',
-  },
-  freeTimeBtnSelected: {
-    borderColor: '#2e86de',
-    backgroundColor: '#1a3a5e',
-  },
-  freeTimeText: {
-    color: '#555',
-    fontSize: 13,
-    fontWeight: '700',
-    letterSpacing: 2.5,
-  },
-  freeTimeTextSelected: { color: '#fff' },
-  freeCheckDot: {
-    position: 'absolute',
-    right: 14,
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    backgroundColor: '#2e86de',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+  sectionLabel: { ...Palette.eyebrow, marginBottom: Spacing.md },
 
   // ── Mode buttons ──────────────────────────
-  modeRow: { flexDirection: 'row', gap: 14 },
+  modeRow: { flexDirection: 'row', gap: Spacing.md },
   modeButton: {
     flex: 1,
-    backgroundColor: '#2a2a3e',
+    backgroundColor: Palette.surface,
     borderWidth: 2,
-    borderColor: '#2a2a3e',
-    borderRadius: 16,
-    paddingVertical: 14,
-    paddingHorizontal: 12,
+    borderColor: Palette.surfaceBorder,
+    borderRadius: Radius.lg,
+    paddingVertical: Spacing.lg,
+    paddingHorizontal: Spacing.md,
     alignItems: 'center',
     position: 'relative',
-    gap: 5,
+    gap: 6,
   },
-  modeButtonSelected: { borderColor: '#2e86de', backgroundColor: '#1a3a5e' },
+  modeButtonSelected: {
+    borderColor: Palette.hue,
+    backgroundColor: Palette.hueTint,
+    // Ingen cardShadow här, och det är själva fixen: skuggan låg bakom en yta
+    // som bara är 10 % täckande och syntes därför rakt igenom knappens eget fyll.
+    // I ljust läge blev det en grå ruta bakom texten i stället för en skugga under
+    // kortet (Android ritar dessutom elevation som en fylld rektangel när
+    // bakgrunden inte är opak); i mörkt läge doldes samma sak av att skuggan är
+    // en blå glöd mot en mörk botten. Valet syns ändå på fem andra sätt — ramen,
+    // fyllet, ikonen, titeln och bocken. Ska en skugga tillbaka måste fyllet
+    // först bli opakt.
+  },
   modeTitle: {
-    color: '#aaa',
-    fontSize: 10,
+    color: Palette.textSecondary,
+    fontSize: 12,
     fontWeight: 'bold',
     letterSpacing: 1,
     textAlign: 'center',
   },
-  modeTitleSelected: { color: '#2e86de' },
+  modeTitleSelected: { color: Palette.hue },
+  // Nedtonat, inte osynligt: knappen ska gå att läsa, bara inte att välja.
+  modeButtonSoon: { opacity: 0.55 },
+  modeTitleSoon: { color: Palette.textDisabled },
+  soonText: {
+    color: Palette.textDisabled,
+    fontSize: 11,
+    fontWeight: 'bold',
+    letterSpacing: 1.5,
+  },
   checkDot: {
     position: 'absolute',
     top: 10,
     right: 10,
     width: 20,
     height: 20,
-    borderRadius: 10,
-    backgroundColor: '#2e86de',
+    borderRadius: Radius.pill,
+    backgroundColor: Palette.accent,
     alignItems: 'center',
     justifyContent: 'center',
   },
   bleRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
   bleDot: { width: 7, height: 7, borderRadius: 4 },
   bleSmallText: {
-    color: 'rgba(255,255,255,0.5)',
-    fontSize: 10,
+    color: Palette.textSecondary,
+    fontSize: 12,
     letterSpacing: 0.3,
     fontStyle: 'italic',
   },
@@ -408,92 +433,85 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 12,
+    marginBottom: Spacing.md,
   },
   addIntentionBtn: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
+    width: 26,
+    height: 26,
+    borderRadius: Radius.pill,
     borderWidth: 1.5,
-    borderColor: '#444',
+    borderColor: Palette.surfaceBorder,
+    backgroundColor: Palette.surface,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  categoryScroll: { paddingHorizontal: 2, gap: 10, flexDirection: 'row' },
+  categoryScroll: { paddingHorizontal: 2, gap: Spacing.sm, flexDirection: 'row' },
   categoryChip: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    backgroundColor: '#2a2a3e',
+    backgroundColor: Palette.surface,
     borderWidth: 1.5,
-    borderColor: '#2a2a3e',
-    borderRadius: 32,
+    borderColor: Palette.surfaceBorder,
+    borderRadius: Radius.pill,
     paddingVertical: 10,
-    paddingHorizontal: 16,
+    paddingHorizontal: Spacing.lg,
   },
-  categoryChipSelected: { borderColor: '#2e86de', backgroundColor: '#1a3a5e' },
+  categoryChipSelected: { borderColor: Palette.hue, backgroundColor: Palette.hueTint },
   categoryEmoji: { fontSize: 16 },
-  categoryText: { color: '#aaa', fontSize: 12, fontWeight: 'bold', letterSpacing: 1.5 },
-  categoryTextSelected: { color: 'white' },
+  categoryText: { color: Palette.textSecondary, fontSize: 13, fontWeight: 'bold', letterSpacing: 1.5 },
+  categoryTextSelected: { color: Palette.textPrimary },
 
   // ── Modal ─────────────────────────────────
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.65)',
+    backgroundColor: Palette.scrimStrong,
     alignItems: 'center',
     justifyContent: 'center',
   },
   addModalBox: {
-    backgroundColor: '#16213e',
-    borderRadius: 20,
-    padding: 24,
+    backgroundColor: Palette.modalSurface,
+    borderRadius: Radius.xl,
+    padding: Spacing.xl,
     width: '88%',
     maxHeight: '75%',
     borderWidth: 1,
-    borderColor: '#2e86de33',
+    borderColor: Palette.modalBorder,
   },
-  addModalTitle: {
-    color: '#555',
-    fontSize: 11,
-    fontWeight: 'bold',
-    letterSpacing: 2,
-    marginBottom: 16,
+  addModalTitle: { ...Palette.eyebrow, marginBottom: Spacing.lg, textAlign: 'center' },
+  helpBody: {
+    color: Palette.textSecondary,
+    fontSize: 14,
+    lineHeight: 21,
     textAlign: 'center',
   },
-  addModalGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, justifyContent: 'flex-start' },
-  addModalChip: {
-    flexDirection: 'row',
+  helpBtn: {
+    marginTop: Spacing.xl,
+    backgroundColor: Palette.accent,
+    paddingVertical: 14,
+    borderRadius: Radius.pill,
     alignItems: 'center',
-    gap: 6,
-    backgroundColor: '#2a2a3e',
-    borderWidth: 1.5,
-    borderColor: '#2a2a3e',
-    borderRadius: 32,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
   },
-  addModalEmoji: { fontSize: 16 },
-  addModalLabel: { color: '#aaa', fontSize: 12, fontWeight: 'bold', letterSpacing: 1.5 },
-  addModalEmpty: { color: '#555', fontSize: 13, textAlign: 'center', paddingVertical: 12 },
+  helpBtnText: { color: Palette.onAccent, fontSize: 14, fontWeight: 'bold', letterSpacing: 2 },
 
   // ── CTA ───────────────────────────────────
   checkInButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#2e86de',
+    backgroundColor: Palette.accent,
     paddingVertical: 18,
     paddingHorizontal: 48,
-    borderRadius: 32,
+    borderRadius: Radius.pill,
     width: '100%',
-    shadowColor: '#2e86de',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.4,
-    shadowRadius: 16,
-    elevation: 10,
+    ...Palette.cardShadow,
   },
-  checkInButtonDisabled: { backgroundColor: '#2a2a3e', shadowOpacity: 0, elevation: 0 },
-  checkInText: { color: 'white', fontSize: 18, fontWeight: 'bold', letterSpacing: 3 },
+  checkInButtonDisabled: { backgroundColor: Palette.surface, shadowOpacity: 0, elevation: 0 },
+  checkInText: { color: Palette.onAccent, fontSize: 18, fontWeight: 'bold', letterSpacing: 3 },
+  // *Keep holding* under CHECK IN efter ett för kort tryck. Raden svävar
+  // under knappen (komponenten placerar den) och tar ingen plats; 4 + 18
+  // slutar ovanför texten i *Not now*, som börjar 16 + 10 under knappen.
+  holdHint: { fontSize: 13, lineHeight: 18, textAlign: 'center', marginTop: 4 },
   noButton: { paddingVertical: 10, paddingHorizontal: 32 },
-  noText: { color: '#555', fontSize: 15 },
+  noText: { color: Palette.textTertiary, fontSize: 15 },
 });

@@ -1,8 +1,9 @@
 // Enda platsen som matar sessionReducer. Lådflödet matas härifrån via
-// BLEContext (boxMessage); det lådlösa flödet dispatchar manuellt från
-// pausing.tsx. Reducern själv vet inte vem som skickade händelsen.
+// BLEContexts meddelandeprenumeration; det lådlösa flödet dispatchar
+// manuellt från pausing.tsx. Reducern själv vet inte vem som skickade
+// händelsen.
 
-import React, { createContext, useContext, useEffect, useReducer, useState } from 'react';
+import React, { createContext, useContext, useEffect, useReducer, useRef, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { enqueueSession, flushOutbox } from '../lib/sessionOutbox';
 import { initialSessionState, SessionEvent, sessionReducer, SessionState } from '../lib/sessionMachine';
@@ -18,11 +19,23 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(sessionReducer, initialSessionState);
   const [batteryPercent, setBatteryPercent] = useState<number | null>(null);
   const { user } = useAuth();
-  const { boxMessage, resetMessage, sendSessionAck } = useBLE();
-  const { boxId, isPairedBox } = useBLEControl();
+  const { subscribeToBoxMessages, sendSessionAck } = useBLE();
+  const { boxId, isPairedBoxRef } = useBLEControl();
 
-  useEffect(() => {
-    if (!boxMessage) return;
+  // Handlern registreras en gång och lever hela appens livstid, så allt den
+  // behöver läsas ur refar — en closure hade frusit tillståndet så som det
+  // såg ut vid registreringen.
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const userIdRef = useRef(user?.id);
+  userIdRef.current = user?.id;
+  const boxIdRef = useRef(boxId);
+  boxIdRef.current = boxId;
+  const sendSessionAckRef = useRef(sendSessionAck);
+  sendSessionAckRef.current = sendSessionAck;
+
+  useEffect(() => subscribeToBoxMessages((boxMessage) => {
+    const state = stateRef.current;
 
     (async () => {
       switch (boxMessage.type) {
@@ -30,7 +43,13 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           // Bara den lådan den här telefonen senast parades med får hoppa
           // rakt in i en skärm — en främmande låda (demo, kompis, butik) ska
           // aldrig kunna kapa gränssnittet med sitt eget tillstånd.
-          if (isPairedBox) {
+          //
+          // Läser reffen, inte isPairedBox-state — state hinner inte alltid
+          // uppdateras innan det här state-meddelandet redan processats
+          // (hello och state kommer i snabb följd vid varje ny anslutning),
+          // vilket annars tyst kastar RESTORE. Se BLEContext.tsx.
+          if (isPairedBoxRef.current) {
+            console.log('BLE: RESTORE →', boxMessage.phase, boxMessage.seq);
             dispatch({
               type: 'RESTORE',
               phase: boxMessage.phase,
@@ -38,18 +57,21 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
               seq: boxMessage.seq,
               withPod: true,
             });
+          } else {
+            console.log('BLE: state mottaget men låda ej parad, ignorerar:', boxMessage.phase);
           }
           break;
 
         case 'touch_begin':
-          dispatch({ type: 'TOUCH_BEGIN', side: boxMessage.side });
+          console.log('BLE: touch_begin', boxMessage.side);
           break;
 
         case 'touch_end':
-          dispatch({ type: 'TOUCH_END', side: boxMessage.side });
+          console.log('BLE: touch_end', boxMessage.side);
           break;
 
         case 'checkin_complete':
+          console.log('BLE: checkin_complete, fas innan:', state.phase);
           dispatch({ type: 'CHECKIN_COMPLETE' });
           break;
 
@@ -58,14 +80,17 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           break;
 
         case 'lid_closed':
+          console.log('BLE: lid_closed, fas innan:', state.phase);
           dispatch({ type: 'LID_CLOSED' });
           break;
 
         case 'lid_opened':
+          console.log('BLE: lid_opened, fas innan:', state.phase, 'withPod:', state.withPod);
           dispatch({ type: 'LID_OPENED' });
           break;
 
         case 'session_started':
+          console.log('BLE: session_started', boxMessage.seq, 'fas innan:', state.phase);
           dispatch({
             type: 'SESSION_STARTED',
             seq: boxMessage.seq,
@@ -80,19 +105,36 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           // enqueueSession är idempotent och returnerar alltid ok, så en
           // omskickad seq (t.ex. efter en kraschad app) fastnar aldrig utan
           // ack.
-          if (user?.id && boxId) {
+          const userId = userIdRef.current;
+          const currentBoxId = boxIdRef.current;
+          if (userId && currentBoxId) {
             await enqueueSession({
-              boxId,
+              boxId: currentBoxId,
               seq: boxMessage.seq,
-              userId: user.id,
+              userId,
               durationMs: boxMessage.durationMs,
               completed: boxMessage.completed,
               withPod: true,
               category: state.category,
+              // ageMs > 0 betyder köad/omskickad session — räkna sluttiden
+              // baklänges istället för att anta att den precis hände nu.
+              recordedAt: new Date(Date.now() - boxMessage.ageMs).toISOString(),
             });
             flushOutbox().catch(() => {});
+            await sendSessionAckRef.current(boxMessage.seq);
+          } else {
+            // Ingen ack när vi inte kunnat lagra. Ackade vi ändå skulle lådan
+            // rensa posten ur sin kö och sessionen vore borta ur båda ändar —
+            // precis det som gjorde att pauser aldrig dök upp i statistiken.
+            // Utan ack ligger den kvar i lådans kö (max 50) och skickas om var
+            // 3:e sekund tills vi vet vilken låda den kom från. Fasen drivs
+            // ändå vidare så användaren inte fastnar på pausskärmen; outboxens
+            // dedupe på (boxId, seq) gör omleveransen ofarlig.
+            console.log(
+              'BLE: session_ended kunde inte lagras (userId:', userId, 'boxId:', currentBoxId,
+              ') — ackar INTE, lådan får skicka om'
+            );
           }
-          await sendSessionAck(boxMessage.seq);
           dispatch({
             type: 'SESSION_ENDED',
             seq: boxMessage.seq,
@@ -108,12 +150,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           // låda mitt i en lång paus är värsta scenariot. Inte löst än.
           break;
       }
-      resetMessage();
     })();
-    // state.category läses vid enqueue men ska inte trigga om effekten på
-    // nytt — den är redan aktuell när session_ended faktiskt kan inträffa.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [boxMessage]);
+  }), [subscribeToBoxMessages]);
 
   return (
     <SessionContext.Provider value={{ state, dispatch, batteryPercent }}>

@@ -14,7 +14,7 @@ export async function signInWithGoogle(): Promise<{ error: string | null }> {
   });
 
   if (error || !data.url) {
-    return { error: error?.message ?? 'Kunde inte starta Google-inloggning.' };
+    return { error: error?.message ?? 'Could not start Google sign-in.' };
   }
 
   const result = await WebBrowser.openAuthSessionAsync(data.url, redirectTo);
@@ -45,5 +45,5 @@ export async function signInWithGoogle(): Promise<{ error: string | null }> {
     return { error: sessionError?.message ?? null };
   }
 
-  return { error: 'Kunde inte slutföra Google-inloggning.' };
+  return { error: 'Could not complete Google sign-in.' };
 }

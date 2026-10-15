@@ -14,7 +14,7 @@ export type BoxMessage =
   | { type: 'lid_closed' }
   | { type: 'lid_opened' }
   | { type: 'session_started'; seq: string }
-  | { type: 'session_ended'; seq: string; durationMs: number; completed: boolean }
+  | { type: 'session_ended'; seq: string; durationMs: number; completed: boolean; ageMs: number }
   | { type: 'battery'; percent: number };
 
 const RESTORABLE_PHASES: SessionPhase[] = [
@@ -64,11 +64,18 @@ export function parseBoxMessage(raw: string): BoxMessage | null {
       return { type: 'session_started', seq };
     }
     case 'session_ended': {
-      const [seq, durationMsRaw, completedRaw] = rest;
+      const [seq, durationMsRaw, completedRaw, ageMsRaw] = rest;
       if (!seq) return null;
       const durationMs = Number(durationMsRaw);
       if (!Number.isFinite(durationMs)) return null;
-      return { type: 'session_ended', seq, durationMs, completed: completedRaw === '1' };
+      const ageMs = Number(ageMsRaw);
+      return {
+        type: 'session_ended',
+        seq,
+        durationMs,
+        completed: completedRaw === '1',
+        ageMs: Number.isFinite(ageMs) ? ageMs : 0,
+      };
     }
     case 'battery': {
       const percent = Number(rest[0]);
@@ -84,18 +91,20 @@ export function encodeSessionAck(seq: string): string {
   return `session_ack:${seq}`;
 }
 
-export function encodeTimeSync(nowMs: number): string {
-  return `time_sync:${nowMs}`;
+// Lådan parsar inte innehållet idag (bara flaggan att den mottagits), men
+// formatet läggs på plats nu så det finns när lådan väl läser det.
+export function encodeSetMode(mode: string, direction: 'UP' | 'DOWN', seconds: number): string {
+  return `set_mode:${mode}:${direction}:${seconds}`;
 }
 
-export function encodeSetMode(mode: string): string {
-  return `set_mode:${mode}`;
-}
-
-// Rent informativ — lådan ignorerar den idag. Skickas som en lokal, kosmetisk
-// signal från placeinbox-skärmens accelerometer-detektion, påverkar aldrig
-// sessionReducer (det är fortfarande box:ens egen phone_down/lid_closed som
-// äger den övergången).
 export function encodePhoneDown(): string {
   return 'phone_down';
+}
+
+// Skickas när appen ser att telefonen lyfts upp under en pågående session.
+// Lådan agerar bara på den när locket redan är öppet, men vi skickar den
+// ändå bara medan vi vet att en session pågår (efter session_started, före
+// session_ended) — se den globala lyft-detekteringen i app/_layout.tsx.
+export function encodePhoneUp(): string {
+  return 'phone_up';
 }

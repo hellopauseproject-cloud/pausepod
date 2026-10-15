@@ -2,41 +2,18 @@ import { FontAwesome5, Ionicons } from '@expo/vector-icons';
 import { CameraView, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
 import { router, useLocalSearchParams } from 'expo-router';
 import { VideoView, useVideoPlayer } from 'expo-video';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator, Linking, Pressable, StyleSheet,
   Text, TouchableOpacity, View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '../contexts/AuthContext';
+import { track } from '../lib/analytics';
 import { supabase } from '../lib/supabase';
-
-const SUPABASE_URL = 'https://iwyumzgewiwvcbuqzjnk.supabase.co';
-const BUCKET = 'support-media';
-
-async function uploadViaXhr(localUri: string, storagePath: string, mimeType: string): Promise<string> {
-  const { data: { session } } = await supabase.auth.getSession();
-  const token = session?.access_token;
-  if (!token) throw new Error('Inte inloggad');
-
-  await new Promise<void>((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${SUPABASE_URL}/storage/v1/object/${BUCKET}/${storagePath}`);
-    xhr.setRequestHeader('Authorization', `Bearer ${token}`);
-    xhr.setRequestHeader('x-upsert', 'true');
-    xhr.onreadystatechange = () => {
-      if (xhr.readyState !== 4) return;
-      if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else reject(new Error(`HTTP ${xhr.status}: ${xhr.responseText}`));
-    };
-    xhr.onerror = () => reject(new Error('Nätverksfel'));
-    const form = new FormData();
-    form.append('', { uri: localUri, type: mimeType, name: storagePath.split('/').pop() ?? 'file' } as any);
-    xhr.send(form);
-  });
-
-  return `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${storagePath}`;
-}
+import { uploadSupportMedia } from '../lib/supportMedia';
+import { AppPalette, alpha } from '../constants/appTheme';
+import { usePalette } from '../contexts/ThemeContext';
 
 const RING_DOTS = 30;
 const RING_R = 50;
@@ -44,6 +21,7 @@ const DOT_D = 6;
 const RING_SIZE = (RING_R + DOT_D / 2 + 2) * 2;
 
 function CountdownRing({ countdown }: { countdown: number }) {
+  const Palette = usePalette();
   const cx = RING_SIZE / 2;
   const cy = RING_SIZE / 2;
   return (
@@ -57,7 +35,7 @@ function CountdownRing({ countdown }: { countdown: number }) {
           <View key={i} style={{
             position: 'absolute', left: x, top: y,
             width: DOT_D, height: DOT_D, borderRadius: DOT_D / 2,
-            backgroundColor: active ? '#e74c3c' : 'rgba(255,255,255,0.12)',
+            backgroundColor: active ? Palette.danger : Palette.ink12,
           }} />
         );
       })}
@@ -68,6 +46,8 @@ function CountdownRing({ countdown }: { countdown: number }) {
 type Phase = 'preview' | 'recording' | 'reviewing' | 'uploading' | 'sent';
 
 export default function SupportRespondVideoScreen() {
+  const Palette = usePalette();
+  const st = useMemo(() => makeSt(Palette), [Palette]);
   const { user } = useAuth();
   const { storyId, ownerName } = useLocalSearchParams<{ storyId: string; ownerName: string }>();
   const insets = useSafeAreaInsets();
@@ -124,36 +104,39 @@ export default function SupportRespondVideoScreen() {
     return () => sub.remove();
   }, [player, phase]);
 
+  // replay() och inte seekTo(): den senare finns inte på expo-videos VideoPlayer
+  // (det är expo-audios API, se voice.tsx) och kastade TypeError när knappen
+  // trycktes. Den egna play() behövs inte heller — replay() gör seek + play i
+  // native på båda plattformarna, trots att typdeklarationen bara nämner seek.
   const handleReplay = () => {
     setVideoEnded(false);
-    player.seekTo(0);
-    player.play();
+    player.replay();
   };
 
   if (!permissionsReady) {
     const permanentlyDenied = cameraDenied || micDenied;
-    const deniedWhat = cameraDenied ? 'Kamera' : 'Mikrofon';
+    const deniedWhat = cameraDenied ? 'Camera' : 'Microphone';
     return (
       <View style={[st.permContainer, { paddingBottom: insets.bottom + 24 }]}>
-        <FontAwesome5 name="video" size={36} color="rgba(162,155,254,0.5)" />
+        <FontAwesome5 name="video" size={36} color={alpha(Palette.community, 0.5)} />
         {permanentlyDenied ? (
           <>
             <Text style={st.permText}>
-              {deniedWhat}tillstånd nekades.{'\n'}Aktivera i Inställningar → Appar → Integritet.
+              {deniedWhat} access was denied.{'\n'}Enable it in Settings → Apps → Privacy.
             </Text>
             <Pressable style={st.permBtn} onPress={() => Linking.openSettings()}>
-              <Text style={st.permBtnText}>Öppna inställningar</Text>
+              <Text style={st.permBtnText}>Open settings</Text>
             </Pressable>
           </>
         ) : cameraPermission?.granted ? (
           <>
-            <Text style={st.permText}>Tillåt åtkomst till mikrofonen för att spela in video.</Text>
+            <Text style={st.permText}>Allow microphone access to record video.</Text>
             <Pressable style={st.permBtn} onPress={() => requestMicPermission()}>
-              <Text style={st.permBtnText}>Tillåt mikrofon</Text>
+              <Text style={st.permBtnText}>Allow microphone</Text>
             </Pressable>
           </>
         ) : (
-          <Text style={st.permText}>Begär kameratillstånd…</Text>
+          <Text style={st.permText}>Requesting camera permission…</Text>
         )}
         <Pressable onPress={() => router.back()} style={[st.closeBtn, { top: insets.top + 12 }]}>
           <FontAwesome5 name="chevron-left" size={15} color="#fff" />
@@ -203,7 +186,7 @@ export default function SupportRespondVideoScreen() {
     try { player.pause(); } catch {}
     try {
       const path = `${user.id}/${Date.now()}.mp4`;
-      const contentUrl = await uploadViaXhr(recordedUri, path, 'video/mp4');
+      const contentUrl = await uploadSupportMedia(recordedUri, path, 'video/mp4');
 
       const { error: dbError } = await supabase.from('support_responses').insert({
         story_id: storyId,
@@ -213,10 +196,11 @@ export default function SupportRespondVideoScreen() {
       });
       if (dbError) throw dbError;
 
+      track('support_response_sent', { response_type: 'video' });
       setPhase('sent');
       setTimeout(() => router.back(), 900);
     } catch (e: any) {
-      setErrorMsg('Uppladdningsfel: ' + (e?.message ?? JSON.stringify(e)));
+      setErrorMsg('Upload error: ' + (e?.message ?? JSON.stringify(e)));
       setPhase('reviewing');
     }
   };
@@ -241,7 +225,7 @@ export default function SupportRespondVideoScreen() {
         <FontAwesome5 name="chevron-left" size={15} color="#fff" />
       </TouchableOpacity>
 
-      <Text style={[st.title, { top: insets.top + 16 }]}>Videopepp till {ownerName}</Text>
+      <Text style={[st.title, { top: insets.top + 16 }]}>Support for {ownerName}</Text>
 
       {phase === 'preview' && (
         <TouchableOpacity
@@ -262,9 +246,9 @@ export default function SupportRespondVideoScreen() {
           {videoEnded && (
             <TouchableOpacity style={st.replayOverlay} onPress={handleReplay} activeOpacity={0.8}>
               <View style={st.replayBtn}>
-                <FontAwesome5 name="redo" size={28} color="#fff" />
+                <FontAwesome5 name="play" size={26} color="#fff" />
               </View>
-              <Text style={st.replayLabel}>Se igen</Text>
+              <Text style={st.replayLabel}>Watch again</Text>
             </TouchableOpacity>
           )}
         </View>
@@ -275,7 +259,7 @@ export default function SupportRespondVideoScreen() {
       <View style={[st.controls, { paddingBottom: bottomPad }]}>
         {(phase === 'preview' || phase === 'recording') && (
           <>
-            {phase === 'preview' && <Text style={st.hint}>Tryck för att spela in</Text>}
+            {phase === 'preview' && <Text style={st.hint}>Tap to record</Text>}
             <View style={{ width: RING_SIZE, height: RING_SIZE, alignItems: 'center', justifyContent: 'center' }}>
               {phase === 'recording' && <CountdownRing countdown={countdown} />}
               <TouchableOpacity
@@ -291,17 +275,21 @@ export default function SupportRespondVideoScreen() {
 
         {phase === 'reviewing' && (
           <View style={st.reviewActions}>
+            <TouchableOpacity style={st.reRecordBtn} onPress={handleReRecord} activeOpacity={0.75}>
+              <FontAwesome5 name="redo" size={13} color={Palette.ink70} />
+              <Text style={st.reRecordText}>Record again</Text>
+            </TouchableOpacity>
             <TouchableOpacity style={st.sendBtn} onPress={handleSend} activeOpacity={0.85}>
               <FontAwesome5 name="paper-plane" size={13} color="#fff" />
-              <Text style={st.sendBtnText}>Skicka</Text>
+              <Text style={st.sendBtnText}>Send</Text>
             </TouchableOpacity>
           </View>
         )}
 
         {phase === 'uploading' && (
           <View style={{ alignItems: 'center', gap: 12 }}>
-            <ActivityIndicator color="#a29bfe" size="large" />
-            <Text style={st.hint}>Laddar upp…</Text>
+            <ActivityIndicator color={Palette.community} size="large" />
+            <Text style={st.hint}>Uploading…</Text>
           </View>
         )}
 
@@ -310,7 +298,7 @@ export default function SupportRespondVideoScreen() {
             <View style={st.sentIcon}>
               <FontAwesome5 name="check" size={24} color="#fff" />
             </View>
-            <Text style={st.hint}>Skickat!</Text>
+            <Text style={st.hint}>Sent!</Text>
           </View>
         )}
 
@@ -324,7 +312,12 @@ export default function SupportRespondVideoScreen() {
   );
 }
 
-const st = StyleSheet.create({
+// Den här skärmen byter aldrig läge. Bakgrunden är kamerabilden, inte en yta
+// appen målar, och allt som ligger ovanpå den (svart botten bakom, vit
+// chrome framför) måste stå kvar mot en bild vi inte känner färgen på. Ett
+// ljust tema hade gett vit text på video. Därför är literalerna här med flit
+// literaler — det är inte färger som glömdes bort i temaomläggningen.
+const makeSt = (Palette: AppPalette) => StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
   closeBtn: { position: 'absolute', left: 16, zIndex: 10, padding: 14 },
   flipBtn: { position: 'absolute', right: 20, zIndex: 10, padding: 10 },
@@ -337,58 +330,71 @@ const st = StyleSheet.create({
     position: 'absolute', bottom: 0, left: 0, right: 0,
     paddingHorizontal: 32,
     alignItems: 'center', gap: 16,
-    backgroundColor: 'rgba(0,0,0,0.5)',
+    backgroundColor: Palette.scrim,
     paddingTop: 20,
   },
-  hint: { color: 'rgba(255,255,255,0.7)', fontSize: 14 },
+  hint: { color: Palette.ink70, fontSize: 14 },
   recordBtn: {
     width: 80, height: 80, borderRadius: 40,
-    backgroundColor: '#a29bfe', alignItems: 'center', justifyContent: 'center',
-    borderWidth: 4, borderColor: 'rgba(255,255,255,0.3)',
+    backgroundColor: Palette.community, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 4, borderColor: Palette.ink30,
   },
-  recordBtnActive: { backgroundColor: '#e74c3c' },
-  reviewActions: { width: '100%' },
+  recordBtnActive: { backgroundColor: Palette.danger },
+  reviewActions: { flexDirection: 'row', gap: 16, width: '100%' },
+  // Spegling av röstskärmens par: samma höjd, radie och ikonstorlek, så de två
+  // svarsflödena känns som samma skydd mot en inspelning man inte vill skicka.
+  // Tonerna är däremot ett steg starkare (ink15/ink40/ink70 mot ink04/ink10/ink50):
+  // här ligger knappen ovanpå en kamerabild bakom en scrim, inte mot appens botten,
+  // och röstskärmens spökknapp hade försvunnit i bilden. Samma toner som
+  // replayBtn och hint i den här filen redan använder över video.
+  reRecordBtn: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    paddingVertical: 14, borderRadius: 28,
+    borderWidth: 1, borderColor: Palette.ink40,
+    backgroundColor: Palette.ink15,
+  },
+  reRecordText: { color: Palette.ink70, fontSize: 14, fontWeight: '600' },
   sendBtn: {
     flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
-    paddingVertical: 14, borderRadius: 28, backgroundColor: '#a29bfe',
+    paddingVertical: 14, borderRadius: 28, backgroundColor: Palette.community,
   },
   sendBtnText: { color: '#fff', fontSize: 14, fontWeight: '700' },
   sentIcon: {
     width: 64, height: 64, borderRadius: 32,
-    backgroundColor: '#27ae60', alignItems: 'center', justifyContent: 'center',
+    backgroundColor: Palette.success, alignItems: 'center', justifyContent: 'center',
   },
   errorBox: {
-    backgroundColor: 'rgba(231,76,60,0.12)', borderRadius: 12,
-    borderWidth: 1, borderColor: 'rgba(231,76,60,0.3)',
+    backgroundColor: alpha(Palette.danger, 0.12), borderRadius: 12,
+    borderWidth: 1, borderColor: alpha(Palette.danger, 0.3),
     padding: 12, width: '100%',
   },
-  errorText: { color: '#e74c3c', fontSize: 12, textAlign: 'center', lineHeight: 17 },
+  errorText: { color: Palette.danger, fontSize: 13, textAlign: 'center', lineHeight: 18 },
 
   // Replay overlay
   replayOverlay: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.55)',
+    backgroundColor: Palette.scrim,
     alignItems: 'center', justifyContent: 'center', gap: 12,
   },
   replayBtn: {
     width: 80, height: 80, borderRadius: 40,
-    backgroundColor: 'rgba(255,255,255,0.15)',
-    borderWidth: 2, borderColor: 'rgba(255,255,255,0.4)',
+    backgroundColor: Palette.ink15,
+    borderWidth: 2, borderColor: Palette.ink40,
     alignItems: 'center', justifyContent: 'center',
   },
-  replayLabel: { color: 'rgba(255,255,255,0.7)', fontSize: 15 },
+  replayLabel: { color: Palette.ink70, fontSize: 15 },
 
   permContainer: {
-    flex: 1, backgroundColor: '#0f0f1a',
+    flex: 1, backgroundColor: Palette.bg,
     alignItems: 'center', justifyContent: 'center',
     padding: 40, gap: 20,
   },
   permText: {
-    color: 'rgba(255,255,255,0.7)', fontSize: 16,
+    color: Palette.ink70, fontSize: 16,
     textAlign: 'center', lineHeight: 24,
   },
   permBtn: {
-    backgroundColor: '#a29bfe', paddingVertical: 14, paddingHorizontal: 36,
+    backgroundColor: Palette.community, paddingVertical: 14, paddingHorizontal: 36,
     borderRadius: 28, marginTop: 8,
   },
   permBtnText: { color: '#fff', fontSize: 15, fontWeight: '700' },

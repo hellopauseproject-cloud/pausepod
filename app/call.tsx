@@ -1,11 +1,15 @@
 import { Entypo, FontAwesome, FontAwesome5 } from '@expo/vector-icons';
 import { setAudioModeAsync, useAudioPlayer } from 'expo-audio';
 import { router } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { AppState, Image, StyleSheet, Text, TouchableOpacity, Vibration, View } from 'react-native';
 import { isInboxActive } from '../lib/inboxGuard';
 import { supabase } from '../lib/supabase';
+import { unopenedResponsesQuery } from '../lib/supportStories';
 import { getPending, setPending } from '../lib/supportQueue';
+import { AppPalette } from '../constants/appTheme';
+import { RoomProvider, usePalette } from '../contexts/ThemeContext';
+import { roomShell, ScreenBackground } from '../components/screen-background';
 
 type SupportInfo = {
   responseType: 'text' | 'voice' | 'video';
@@ -15,10 +19,27 @@ type SupportInfo = {
 
 const VIBRATION_PATTERN = [0, 200, 1200, 200, 1200, 200, 1200, 200, 1200];
 
-export default function CallScreen() {
+/**
+ * Hör till **friends-rummet**. Rummet följer ärendet och inte filträdet — se
+ * ROOMS i [constants/appTheme.ts](../constants/appTheme.ts). Skalet är
+ * identiskt med de andra rummens: en komponent kan inte läsa sin egen
+ * provider, och en bakgrund i skalet täcker varje gren skärmen returnerar.
+ */
+export default function CallRoom() {
+  return (
+    <RoomProvider room="friends">
+      <View style={roomShell}>
+        <ScreenBackground room="friends" />
+        <CallScreen />
+      </View>
+    </RoomProvider>
+  );
+}
+
+function CallScreen() {
+  const Palette = usePalette();
+  const styles = useMemo(() => makeStyles(Palette), [Palette]);
   const ringtonePlayer = useAudioPlayer(require('../assets/images/Ringsignal.mp3'));
-  const [callerName, setCallerName] = useState('');
-  const [callerPhoto, setCallerPhoto] = useState<string | null>(null);
   const [supportInfo, setSupportInfo] = useState<SupportInfo | null>(null);
 
   useEffect(() => {
@@ -34,19 +55,17 @@ export default function CallScreen() {
       const userId = session?.user?.id;
       if (!userId) return;
 
-      const { data: myStories } = await supabase
-        .from('support_stories')
-        .select('id')
-        .eq('user_id', userId)
-        .eq('is_active', true);
-
-      if (!myStories || myStories.length === 0) return;
-
-      const { data: responses } = await supabase
-        .from('support_responses')
-        .select('id, story_id, response_type, content_url, text_content, sender_id')
-        .in('story_id', myStories.map(s => s.id))
-        .is('delivered_at', null)
+      // Bara det som faktiskt ringer. Frågan tog förut det äldsta oöppnade
+      // svaret av VILKEN sort som helst, trots att vägen hit (luren i Friends)
+      // bara öppnas när det finns röst eller video — ett äldre textsvar kunde
+      // alltså ringa som ett samtal. Med fotosvaret blev det värre: `photo`
+      // finns inte i ternären som sätter underrubriken och hade fallit igenom
+      // till "video". Sorterna som inte ringer bärs av kuvertet i stället.
+      // Svaren överlever förfrågan: alla egna stories, också utgångna.
+      const { data: responses } = await unopenedResponsesQuery(
+        userId, 'id, story_id, response_type, content_url, text_content, sender_id',
+      )
+        .in('response_type', ['voice', 'video'])
         .order('created_at', { ascending: true })
         .limit(1);
 
@@ -62,13 +81,13 @@ export default function CallScreen() {
         responseType: r.response_type as 'text' | 'voice' | 'video',
         contentUrl: r.content_url,
         textContent: r.text_content,
-        senderName: sender?.username ?? 'En vän',
+        senderName: sender?.username ?? 'A friend',
         senderAvatarUrl: sender?.avatar_url ?? null,
       });
 
       setSupportInfo({
         responseType: r.response_type as 'text' | 'voice' | 'video',
-        senderName: sender?.username ?? 'En vän',
+        senderName: sender?.username ?? 'A friend',
         senderAvatarUrl: sender?.avatar_url ?? null,
       });
     };
@@ -77,20 +96,6 @@ export default function CallScreen() {
 
   useEffect(() => {
     let mounted = true;
-
-    const loadProfile = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!mounted) return;
-      const userId = session?.user?.id;
-      if (!userId) return;
-      const { data } = await supabase.from('profiles').select('username, avatar_url').eq('id', userId).maybeSingle();
-      if (!mounted) return;
-      if (!getPending()) {
-        setCallerName(data?.username ?? 'Dig själv');
-        setCallerPhoto(data?.avatar_url ?? null);
-      }
-    };
-    loadProfile();
 
     const startAudio = async () => {
       if (!mounted) return;
@@ -146,16 +151,13 @@ export default function CallScreen() {
     await new Promise(resolve => setTimeout(resolve, 300));
   };
 
-  const handleAccept = async (fallback: 'voice' | 'video' = 'voice') => {
+  const handleAccept = async () => {
     await stopRinging();
     const pending = getPending();
-    if (pending) {
-      if (pending.responseType === 'text') router.replace('/support-view-text');
-      else if (pending.responseType === 'video') router.replace('/video');
-      else router.replace('/voice');
-    } else {
-      router.replace(fallback === 'video' ? '/video' : '/voice');
-    }
+    if (!pending) { router.replace('/(tabs)'); return; }
+    if (pending.responseType === 'text') router.replace('/support-view-text');
+    else if (pending.responseType === 'video') router.replace('/video');
+    else router.replace('/voice');
   };
 
   const handleHangUp = async () => {
@@ -163,16 +165,16 @@ export default function CallScreen() {
     router.replace('/(tabs)');
   };
 
-  const displayName = supportInfo ? supportInfo.senderName : (callerName || 'Dig själv');
-  const displayPhoto = supportInfo ? supportInfo.senderAvatarUrl : callerPhoto;
+  const displayName = supportInfo ? supportInfo.senderName : 'Connecting...';
+  const displayPhoto = supportInfo ? supportInfo.senderAvatarUrl : null;
   const displaySubtitle = supportInfo
-    ? `Pepp från ${supportInfo.senderName} (${supportInfo.responseType === 'text' ? 'text' : supportInfo.responseType === 'voice' ? 'röst' : 'video'})`
-    : 'Inkommande samtal...';
+    ? `Support from ${supportInfo.senderName} (${supportInfo.responseType === 'text' ? 'text' : supportInfo.responseType === 'voice' ? 'voice' : 'video'})`
+    : 'Incoming call...';
 
   return (
     <View style={styles.container}>
       <View style={styles.logoContainer}>
-        <FontAwesome name="pause" size={16} color="#2e86de" />
+        <FontAwesome name="pause" size={16} color={Palette.accent} />
         <Text style={styles.appName}>PAUSE POD</Text>
       </View>
 
@@ -181,7 +183,7 @@ export default function CallScreen() {
           <Image source={{ uri: displayPhoto }} style={styles.avatar} />
         ) : (
           <View style={styles.avatarPlaceholder}>
-            <FontAwesome5 name="user" size={48} color="#2e86de" />
+            <FontAwesome5 name="user" size={48} color={Palette.accent} />
           </View>
         )}
         <Text style={styles.callerName}>{displayName}</Text>
@@ -192,35 +194,35 @@ export default function CallScreen() {
         <View style={styles.buttonRow}>
           {!supportInfo ? (
             <>
-              <TouchableOpacity style={styles.videoButton} onPress={() => handleAccept('video')}>
-                <FontAwesome5 name="video" size={28} color="white" />
+              <TouchableOpacity style={styles.videoButton} onPress={handleAccept}>
+                <FontAwesome5 name="video" size={28} color={Palette.onAccent} />
               </TouchableOpacity>
-              <TouchableOpacity style={styles.voiceButton} onPress={() => handleAccept('voice')}>
-                <FontAwesome5 name="phone-alt" size={28} color="white" />
+              <TouchableOpacity style={styles.voiceButton} onPress={handleAccept}>
+                <FontAwesome5 name="phone-alt" size={28} color={Palette.onAccent} />
               </TouchableOpacity>
             </>
           ) : supportInfo.responseType === 'video' ? (
-            <TouchableOpacity style={styles.videoButton} onPress={() => handleAccept()}>
-              <FontAwesome5 name="video" size={28} color="white" />
+            <TouchableOpacity style={styles.videoButton} onPress={handleAccept}>
+              <FontAwesome5 name="video" size={28} color={Palette.onAccent} />
             </TouchableOpacity>
           ) : (
-            <TouchableOpacity style={styles.voiceButton} onPress={() => handleAccept()}>
-              <FontAwesome5 name="phone-alt" size={28} color="white" />
+            <TouchableOpacity style={styles.voiceButton} onPress={handleAccept}>
+              <FontAwesome5 name="phone-alt" size={28} color={Palette.onAccent} />
             </TouchableOpacity>
           )}
         </View>
         <TouchableOpacity style={styles.hangUpButton} onPress={handleHangUp}>
-          <Entypo name="block" size={28} color="white" />
+          <Entypo name="block" size={28} color={Palette.onAccent} />
         </TouchableOpacity>
       </View>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (Palette: AppPalette) => StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: 'transparent',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingVertical: 50,
@@ -234,7 +236,7 @@ const styles = StyleSheet.create({
   appName: {
     fontSize: 14,
     fontWeight: 'bold',
-    color: '#2e86de',
+    color: Palette.accent,
     letterSpacing: 4,
     lineHeight: 16,
   },
@@ -251,22 +253,22 @@ const styles = StyleSheet.create({
     width: 120,
     height: 120,
     borderRadius: 60,
-    backgroundColor: '#2a2a3e',
+    backgroundColor: Palette.surface,
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 30,
     borderWidth: 2,
-    borderColor: '#2e86de',
+    borderColor: Palette.accent,
   },
   callerName: {
     fontSize: 36,
-    color: 'white',
+    color: Palette.textPrimary,
     fontWeight: 'bold',
     marginBottom: 8,
   },
   callerSubtitle: {
     fontSize: 18,
-    color: '#aaa',
+    color: Palette.textSecondary,
   },
   buttons: {
     alignItems: 'center',
@@ -278,7 +280,7 @@ const styles = StyleSheet.create({
     gap: 60,
   },
   voiceButton: {
-    backgroundColor: '#2ecc71',
+    backgroundColor: Palette.callAccept,
     width: 80,
     height: 80,
     borderRadius: 40,
@@ -286,7 +288,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   videoButton: {
-    backgroundColor: '#2e86de',
+    backgroundColor: Palette.accent,
     width: 80,
     height: 80,
     borderRadius: 40,
@@ -294,7 +296,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   hangUpButton: {
-    backgroundColor: '#e74c3c',
+    backgroundColor: Palette.danger,
     width: 80,
     height: 80,
     borderRadius: 40,

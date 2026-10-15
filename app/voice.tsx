@@ -1,21 +1,43 @@
 import { FontAwesome, FontAwesome5 } from '@expo/vector-icons';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
-import * as FileSystem from 'expo-file-system/legacy';
 import { router } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { openPauseStart } from '../lib/pauseFlow';
 import { supabase } from '../lib/supabase';
 import { clearPending, getPending } from '../lib/supportQueue';
+import { AppPalette, Radius } from '../constants/appTheme';
+import { RoomProvider, usePalette } from '../contexts/ThemeContext';
+import { roomShell, ScreenBackground } from '../components/screen-background';
 
-export default function VoiceScreen() {
+/**
+ * Hör till **friends-rummet**. Rummet följer ärendet och inte filträdet — se
+ * ROOMS i [constants/appTheme.ts](../constants/appTheme.ts). Skalet är
+ * identiskt med de andra rummens: en komponent kan inte läsa sin egen
+ * provider, och en bakgrund i skalet täcker varje gren skärmen returnerar.
+ */
+export default function VoiceRoom() {
+  return (
+    <RoomProvider room="friends">
+      <View style={roomShell}>
+        <ScreenBackground room="friends" />
+        <VoiceScreen />
+      </View>
+    </RoomProvider>
+  );
+}
+
+function VoiceScreen() {
+  const Palette = usePalette();
+  const styles = useMemo(() => makeStyles(Palette), [Palette]);
   const pickupPlayer = useAudioPlayer(require('../assets/images/Pickupsound.mp3'));
   const voicePlayer = useAudioPlayer(null);
   const hangupPlayer = useAudioPlayer(require('../assets/images/HangUpSound.mp3'));
   const voiceStatus = useAudioPlayerStatus(voicePlayer);
 
   const [speakerOn, setSpeakerOn] = useState(false);
-  const [callerName, setCallerName] = useState('Dig själv');
+  const [callerName, setCallerName] = useState('');
   const [callerPhoto, setCallerPhoto] = useState<string | null>(null);
   const [noFile, setNoFile] = useState(false);
   const [showReplay, setShowReplay] = useState(false);
@@ -53,16 +75,6 @@ export default function VoiceScreen() {
         supportResponseIdRef.current = pending.id;
         setCallerName(pending.senderName);
         if (pending.senderAvatarUrl) setCallerPhoto(pending.senderAvatarUrl);
-      } else {
-        const { data: { session } } = await supabase.auth.getSession();
-        if (!mounted) return;
-        if (session?.user?.id) {
-          const { data: profile } = await supabase
-            .from('profiles').select('username, avatar_url').eq('id', session.user.id).maybeSingle();
-          if (!mounted) return;
-          setCallerName(profile?.username || 'Dig själv');
-          if (profile?.avatar_url?.startsWith('https://')) setCallerPhoto(profile.avatar_url);
-        }
       }
 
       if (!mounted) return;
@@ -88,25 +100,7 @@ export default function VoiceScreen() {
         return;
       }
 
-      // Existing behaviour: play from local file
-      let audioUri: string | null = null;
-      try {
-        const savedFiles = await FileSystem.readAsStringAsync(
-          FileSystem.documentDirectory + 'selectedFiles.json'
-        );
-        const { voice } = JSON.parse(savedFiles);
-        if (voice) audioUri = voice;
-      } catch (e) {}
-
-      if (!mounted) return;
-
-      if (!audioUri) {
-        setNoFile(true);
-        return;
-      }
-
-      voicePlayer.replace({ uri: audioUri });
-      voicePlayer.play();
+      setNoFile(true);
     };
 
     load();
@@ -170,7 +164,7 @@ export default function VoiceScreen() {
       await supabase.from('support_responses').update({ delivered_at: ts, played_at: ts }).eq('id', supportResponseIdRef.current);
       supportResponseIdRef.current = null;
     }
-    router.push('/pause');
+    openPauseStart('push');
   };
 
   return (
@@ -180,27 +174,27 @@ export default function VoiceScreen() {
           <Image source={{ uri: callerPhoto }} style={styles.avatar} />
         ) : (
           <View style={styles.avatar}>
-            <FontAwesome5 name="user" size={48} color="#2e86de" />
+            <FontAwesome5 name="user" size={48} color={Palette.accent} />
           </View>
         )}
         <Text style={styles.callerName}>{callerName}</Text>
         <Text style={styles.callerSubtitle}>
-          {noFile ? 'Inget röstmeddelande uppladdat' : showReplay ? 'Meddelandet är slut' : 'Röstsamtal pågår...'}
+          {noFile ? 'No message to play' : showReplay ? 'Message finished' : 'Call in progress...'}
         </Text>
       </View>
 
       <View style={styles.buttons}>
         {showReplay && (
           <TouchableOpacity style={styles.replayButton} onPress={handleReplay}>
-            <MaterialIcons name="replay" size={32} color="white" />
+            <MaterialIcons name="replay" size={32} color={Palette.onAccent} />
           </TouchableOpacity>
         )}
 
         {showPauseLink && (
           <Animated.View style={{ opacity: fadeAnim }}>
             <TouchableOpacity style={styles.pauseBtn} onPress={handlePauseLink} activeOpacity={0.85}>
-              <FontAwesome name="pause" size={16} color="white" />
-              <Text style={styles.pauseBtnText}>TA EN PAUS</Text>
+              <FontAwesome name="pause" size={16} color={Palette.onAccent} />
+              <Text style={styles.pauseBtnText}>TAKE A PAUSE</Text>
             </TouchableOpacity>
           </Animated.View>
         )}
@@ -209,21 +203,21 @@ export default function VoiceScreen() {
           style={[styles.speakerButton, speakerOn && styles.speakerButtonActive]}
           onPress={toggleSpeaker}
         >
-          <FontAwesome5 name="volume-up" size={24} color="white" />
+          <FontAwesome5 name="volume-up" size={24} color={Palette.onAccent} />
         </TouchableOpacity>
 
         <TouchableOpacity style={styles.hangUpButton} onPress={handleHangUp}>
-          <FontAwesome name="phone" size={32} color="white" style={{ transform: [{ rotate: '135deg' }] }} />
+          <FontAwesome name="phone" size={32} color={Palette.onAccent} style={{ transform: [{ rotate: '135deg' }] }} />
         </TouchableOpacity>
       </View>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (Palette: AppPalette) => StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: 'transparent',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingVertical: 80,
@@ -233,62 +227,58 @@ const styles = StyleSheet.create({
     width: 120,
     height: 120,
     borderRadius: 60,
-    backgroundColor: '#2a2a3e',
+    backgroundColor: Palette.surface,
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 20,
     borderWidth: 2,
-    borderColor: '#2e86de',
+    borderColor: Palette.accent,
   },
   callerName: {
     fontSize: 36,
-    color: 'white',
+    color: Palette.textPrimary,
     fontWeight: 'bold',
     marginBottom: 8,
   },
-  callerSubtitle: { fontSize: 18, color: '#aaa' },
+  callerSubtitle: { fontSize: 18, color: Palette.textSecondary },
   buttons: { alignItems: 'center', gap: 20 },
   replayButton: {
-    backgroundColor: '#2a2a3e',
+    backgroundColor: Palette.surface,
     width: 70,
     height: 70,
     borderRadius: 35,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 2,
-    borderColor: '#2e86de',
+    borderColor: Palette.accent,
   },
   pauseBtn: {
-    backgroundColor: '#2e86de',
+    backgroundColor: Palette.accent,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
     paddingVertical: 14,
     paddingHorizontal: 28,
-    borderRadius: 40,
-    shadowColor: '#2e86de',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.4,
-    shadowRadius: 16,
-    elevation: 10,
+    borderRadius: Radius.pill,
+    ...Palette.cardShadow,
   },
   pauseBtnText: {
-    color: 'white',
+    color: Palette.onAccent,
     fontSize: 15,
     fontWeight: '700',
     letterSpacing: 3,
   },
   speakerButton: {
     alignItems: 'center',
-    backgroundColor: '#555',
+    backgroundColor: Palette.textFaint,
     width: 80,
     height: 80,
     borderRadius: 40,
     justifyContent: 'center',
   },
-  speakerButtonActive: { backgroundColor: '#2e86de' },
+  speakerButtonActive: { backgroundColor: Palette.accent },
   hangUpButton: {
-    backgroundColor: '#e74c3c',
+    backgroundColor: Palette.danger,
     width: 80,
     height: 80,
     borderRadius: 40,

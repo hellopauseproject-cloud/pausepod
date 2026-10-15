@@ -1,15 +1,38 @@
 import { FontAwesome5 } from '@expo/vector-icons';
 import { router, useLocalSearchParams } from 'expo-router';
 import DismissKeyboardView from './components/DismissKeyboardView';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   KeyboardAvoidingView, Platform, StyleSheet,
   Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
 import { useAuth } from '../contexts/AuthContext';
+import { track } from '../lib/analytics';
 import { supabase } from '../lib/supabase';
+import { AppPalette, Radius, alpha } from '../constants/appTheme';
+import { RoomProvider, usePalette } from '../contexts/ThemeContext';
+import { roomShell, ScreenBackground } from '../components/screen-background';
 
-export default function SupportRespondTextScreen() {
+/**
+ * Hör till **friends-rummet**. Rummet följer ärendet och inte filträdet — se
+ * ROOMS i [constants/appTheme.ts](../constants/appTheme.ts). Skalet är
+ * identiskt med de andra rummens: en komponent kan inte läsa sin egen
+ * provider, och en bakgrund i skalet täcker varje gren skärmen returnerar.
+ */
+export default function SupportRespondTextRoom() {
+  return (
+    <RoomProvider room="friends">
+      <View style={roomShell}>
+        <ScreenBackground room="friends" />
+        <SupportRespondTextScreen />
+      </View>
+    </RoomProvider>
+  );
+}
+
+function SupportRespondTextScreen() {
+  const Palette = usePalette();
+  const s = useMemo(() => makeS(Palette), [Palette]);
   const { user } = useAuth();
   const { storyId, ownerName } = useLocalSearchParams<{ storyId: string; ownerName: string }>();
   const [text, setText] = useState('');
@@ -26,6 +49,9 @@ export default function SupportRespondTextScreen() {
       text_content: text.trim(),
     });
     if (!error) {
+      // Längden, inte texten: ett stödsvar är det mest privata appen bär,
+      // och händelseloggen behöver bara veta att det skickades.
+      track('support_response_sent', { response_type: 'text', length: text.trim().length });
       setSent(true);
       setTimeout(() => router.back(), 900);
     } else {
@@ -44,20 +70,20 @@ export default function SupportRespondTextScreen() {
 
         <View style={s.header}>
           <TouchableOpacity onPress={() => router.back()} style={s.closeBtn} activeOpacity={0.7}>
-            <FontAwesome5 name="times" size={15} color="rgba(255,255,255,0.4)" />
+            <FontAwesome5 name="times" size={15} color={Palette.ink40} />
           </TouchableOpacity>
-          <Text style={s.title}>Svara {ownerName}</Text>
+          <Text style={s.title}>Reply to {ownerName}</Text>
           <View style={{ width: 40 }} />
         </View>
 
-        <Text style={s.subtitle}>Ditt textmeddelande levereras när {ownerName} öppnar appen.</Text>
+        <Text style={s.subtitle}>Your text message will be delivered when {ownerName} opens the app.</Text>
 
         <TextInput
           style={s.input}
           value={text}
           onChangeText={t => { if (t.length <= 300) setText(t); }}
-          placeholder={`Skriv ett pepp till ${ownerName}…`}
-          placeholderTextColor="rgba(255,255,255,0.2)"
+          placeholder={`Write a few words of support to ${ownerName}…`}
+          placeholderTextColor={Palette.ink20}
           multiline
           maxLength={300}
           autoFocus
@@ -71,9 +97,9 @@ export default function SupportRespondTextScreen() {
           disabled={!text.trim() || sending || sent}
           activeOpacity={0.85}
         >
-          <FontAwesome5 name={sent ? 'check' : 'paper-plane'} size={14} color="#fff" />
+          <FontAwesome5 name={sent ? 'check' : 'paper-plane'} size={14} color={Palette.onAccent} />
           <Text style={s.sendBtnText}>
-            {sent ? 'Skickat!' : sending ? 'Skickar…' : 'Skicka'}
+            {sent ? 'Sent!' : sending ? 'Sending…' : 'Send'}
           </Text>
         </TouchableOpacity>
       </View>
@@ -82,32 +108,32 @@ export default function SupportRespondTextScreen() {
   );
 }
 
-const s = StyleSheet.create({
-  root: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.5)' },
+const makeS = (Palette: AppPalette) => StyleSheet.create({
+  root: { flex: 1, justifyContent: 'flex-end', backgroundColor: Palette.scrim },
   container: {
-    backgroundColor: '#13131f', borderTopLeftRadius: 28, borderTopRightRadius: 28,
+    backgroundColor: Palette.surfaceAlt, borderTopLeftRadius: Radius.xl, borderTopRightRadius: Radius.xl,
     padding: 24, paddingBottom: 48, gap: 16,
-    borderTopWidth: 1, borderColor: 'rgba(255,255,255,0.06)',
+    borderTopWidth: 1, borderColor: Palette.surfaceBorder,
   },
   handle: {
     width: 36, height: 4, borderRadius: 2,
-    backgroundColor: 'rgba(255,255,255,0.15)', alignSelf: 'center', marginBottom: 8,
+    backgroundColor: Palette.ink15, alignSelf: 'center', marginBottom: 8,
   },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   closeBtn: { width: 44, height: 44, justifyContent: 'center', alignItems: 'flex-start' },
-  title: { fontSize: 17, fontWeight: '700', color: '#ffffff', letterSpacing: 0.2 },
-  subtitle: { fontSize: 13, color: 'rgba(255,255,255,0.3)', lineHeight: 19 },
+  title: { fontSize: 17, fontWeight: '700', color: Palette.textPrimary, letterSpacing: 0.2 },
+  subtitle: { fontSize: 14, color: Palette.textTertiary, lineHeight: 20 },
   input: {
-    backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 14,
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)',
-    padding: 16, color: '#ffffff', fontSize: 15,
+    backgroundColor: Palette.surface, borderRadius: Radius.md,
+    borderWidth: 1, borderColor: Palette.surfaceBorder,
+    padding: 16, color: Palette.textPrimary, fontSize: 15,
     minHeight: 120, textAlignVertical: 'top', lineHeight: 22,
   },
-  charCount: { color: 'rgba(255,255,255,0.18)', fontSize: 11, textAlign: 'right' },
+  charCount: { color: Palette.textDisabled, fontSize: 12, textAlign: 'right' },
   sendBtn: {
-    backgroundColor: '#a29bfe', paddingVertical: 14, borderRadius: 32,
+    backgroundColor: Palette.community, paddingVertical: 14, borderRadius: 32,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
   },
-  sendBtnDisabled: { backgroundColor: 'rgba(162,155,254,0.2)' },
-  sendBtnText: { color: '#fff', fontSize: 15, fontWeight: '700', letterSpacing: 0.3 },
+  sendBtnDisabled: { backgroundColor: alpha(Palette.community, 0.2) },
+  sendBtnText: { color: Palette.onAccent, fontSize: 15, fontWeight: '700', letterSpacing: 0.3 },
 });

@@ -856,6 +856,40 @@ function HomeScreen() {
               )}
               {goalMet && <Text style={styles.goalMet}>GOAL REACHED</Text>}
             </>
+          ) : HOME_RING_VIEW ? (
+            // Utan mål står ringen ändå, tom, och är vägen till det första
+            // målet. Testare med nytt konto hittade annars inte ringen alls:
+            // länken under rubriken döljs med krets och efter *Set up later*,
+            // och då gick målet bara att sätta från kretsfliken.
+            <TouchableOpacity
+              onPress={openGoalModal}
+              activeOpacity={0.75}
+              accessibilityRole="button"
+              accessibilityLabel="Set a daily goal"
+            >
+              <ProgressArc
+                fraction={0}
+                size={heroRing.size}
+                stroke={heroRing.stroke}
+                color={Palette.hue}
+                trackColor={Palette.hueTrack}
+              >
+                <View style={[styles.ringCenter, { width: heroRing.size - 2 * (heroRing.stroke + 10) }]}>
+                  <Text
+                    style={[styles.dailyBig, { fontSize: heroRing.bigFont, lineHeight: Math.round(heroRing.bigFont * BIG_LINE) }]}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.6}
+                  >
+                    {heroAmount(todayShown).value}
+                    <Text style={[styles.dailyUnit, { fontSize: heroRing.unitFont }]}>
+                      {' '}{heroAmount(todayShown).unit}
+                    </Text>
+                  </Text>
+                  <Text style={[styles.ringSub, { color: Palette.hue, fontWeight: '700' }]}>Set a goal</Text>
+                </View>
+              </ProgressArc>
+            </TouchableOpacity>
           ) : (
             <>
               <Text style={styles.headline}>Ready for a pause?</Text>

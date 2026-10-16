@@ -25,6 +25,7 @@ import { PauseType } from '../lib/sessionMachine';
 import { saveSleepSession, SLEEP_AUTO_END_MS, SLEEP_MAX_SECONDS } from '../lib/sleep';
 import { supabase } from '../lib/supabase';
 import { isFaceDown } from '../lib/tilt';
+import { hideNavBar, onNavBarShown, showNavBar } from '../lib/pauseNavBar';
 import { clearSessionCheckpoint, findCategoryById, logPause, saveSessionCheckpoint } from './pauseLogger';
 
 // Finish-knappens radie, delad med hållknappens fyllning så att den klipps
@@ -68,6 +69,10 @@ const STILL_MAX_ACCEL_M_S2 = 0.25;
 // telefonen som rörd. Ett ärligt lås kommer aldrig så tätt inpå en återkomst.
 const STILL_MIN_SAMPLES = 4;
 
+// Hur länge efter att appen själv gömt eller visat navigeringsfältet en
+// "fältet syns"-händelse anses vara appens egen och inte en hands.
+const NAV_BAR_SETTLE_MS = 1000;
+
 type MotionSample = { t: number; rot: number | null; acc: number | null };
 
 const magnitude3 = (a: number, b: number, c: number) => Math.sqrt(a * a + b * b + c * c);
@@ -91,6 +96,32 @@ function assessStillness(samples: MotionSample[], now: number) {
     (maxAcc === null || maxAcc <= STILL_MAX_ACCEL_M_S2)
   );
   return { still, maxRot, maxAcc, samples: recent.length };
+}
+
+// ── Har telefonen lagt sig, efter att appen lämnats? ──
+//
+// Kortare fönster än STILL_WINDOW_MS, för sensorn hinner bara leverera
+// 0,3–1 s efter att appen lämnats. Bara rotationen räknas: accelerometern
+// brusar på en del Android-telefoner över STILL_MAX_ACCEL_M_S2 även på ett
+// bord (0,3–0,6 m/s² vid 0,02°/s), medan gyrot skiljer bord från hand med
+// marginal (≈0,02 mot 6–55°/s). Accelerationen används bara där gyro saknas.
+const SETTLE_WINDOW_MS = 400;
+const SETTLE_MIN_SAMPLES = 3;
+
+function assessSettled(samples: MotionSample[], now: number) {
+  const recent = samples.filter(s => now - s.t <= SETTLE_WINDOW_MS);
+  let maxRot: number | null = null;
+  let maxAcc: number | null = null;
+  for (const s of recent) {
+    if (s.rot !== null) maxRot = Math.max(maxRot ?? 0, s.rot);
+    if (s.acc !== null) maxAcc = Math.max(maxAcc ?? 0, s.acc);
+  }
+  const settled = recent.length >= SETTLE_MIN_SAMPLES && (
+    maxRot !== null ? maxRot <= STILL_MAX_ROTATION_DEG_S
+    : maxAcc !== null ? maxAcc <= STILL_MAX_ACCEL_M_S2
+    : true
+  );
+  return { settled, maxRot, samples: recent.length };
 }
 
 function generateLocalSeq(): string {
@@ -231,6 +262,14 @@ function PausingScreen() {
   // `background`, och sensorn kan ha tystnat mellan dem — ett andra omdöme
   // över ett tomt fönster hade fryst en ärlig paus.
   const leaveDecidedRef = useRef(false);
+  // Ligger appen framme? Sensorn lever en stund efter att appen lämnats, och
+  // i bakgrunden får den starta klockan bara om telefonen lagt sig still — se
+  // vägen in i vilan i sensorlyssnaren.
+  const appActiveRef = useRef(AppState.currentState === 'active');
+  // Satt av en beröring medan klockan går, och släppt först när telefonen
+  // vänts upp. Utan spärren hade en telefon som hålls nedåtvänd gått igen
+  // efter FACE_DOWN_STABLE_MS, och beröringen hade bara kostat 300 ms.
+  const touchLockRef = useRef(false);
 
   // ── Återkopplingen på att lägesbytet gick fram ──
   //
@@ -392,6 +431,7 @@ function PausingScreen() {
         // Råvärdet, utan stabilitetsfönster — det är det AppState-lyssnaren
         // nedan måste gå på i det ögonblick appen lämnas.
         rawFaceDownRef.current = down;
+        if (!down) touchLockRef.current = false;
 
         // Högst en rad i sekunden; tickarna dränker annars konsolen. Rot och
         // acc är fönstrets toppar — det är dem trösklarna ska kalibreras mot.
@@ -405,8 +445,41 @@ function PausingScreen() {
         }
 
         if (down === restingRef.current) { faceChangedAtRef.current = null; return; }
+        // Vägen in i vilan har två extra villkor, och vägen ut inga — att
+        // frysa är alltid ofarligt.
+        //  - En beröring har fryst klockan och telefonen har inte vänts upp
+        //    sedan dess (touchLockRef).
+        if (down && touchLockRef.current) {
+          faceChangedAtRef.current = null;
+          return;
+        }
         if (faceChangedAtRef.current === null) { faceChangedAtRef.current = Date.now(); return; }
         if (Date.now() - faceChangedAtRef.current < (down ? FACE_DOWN_STABLE_MS : FACE_STABLE_MS)) return;
+        //  - Appen ligger inte framme. Sensorn levererar en kort stund efter
+        //    att appen lämnats (0,3–1 s i loggarna), och det är sista chansen
+        //    att se telefonen. Där får klockan gå igen bara om telefonen har
+        //    lagt sig still (SETTLE_*). Två ärliga mönster hänger på det: en
+        //    telefon på bordet vars accelerometer brusar över stillhetsgrinden,
+        //    och en som låses i samma rörelse som den läggs ner — båda fryses
+        //    när appen lämnas och landar stilla en halv sekund senare. En
+        //    telefon som hålls nedåtvänd i en hand blir aldrig så still, och
+        //    då står klockan frusen tills appen öppnas igen. Utan villkoret
+        //    "lades den ner igen" 400 ms efter hemknappen, och klockan gick
+        //    medan man scrollade i en annan app.
+        //    Faller provet ligger faceChangedAtRef kvar, så att varje ny
+        //    avläsning prövar igen tills telefonen lagt sig eller sensorn
+        //    tystnat.
+        if (down && !appActiveRef.current) {
+          const settle = assessSettled(win, nowMs);
+          if (!settle.settled) return;
+          console.log('FaceDown: lade sig still efter att appen lämnats, rot=',
+            settle.maxRot?.toFixed(2) ?? '–', '→ PHONE_RESTED');
+          track('pause_settled_after_leave', {
+            kind: isSleep ? 'sleep' : 'pause',
+            max_rotation_deg_s: settle.maxRot === null ? null : Math.round(settle.maxRot * 100) / 100,
+            samples: settle.samples,
+          });
+        }
 
         faceChangedAtRef.current = null;
         restingRef.current = down;
@@ -456,6 +529,7 @@ function PausingScreen() {
   useEffect(() => {
     if (isPodFlowRef.current) return;
     const sub = AppState.addEventListener('change', next => {
+      appActiveRef.current = next === 'active';
       if (next === 'active') {
         leaveDecidedRef.current = false;
         activeSinceRef.current = Date.now();
@@ -728,6 +802,55 @@ function PausingScreen() {
     });
   };
 
+  // ── Ett bord rör aldrig skärmen ──
+  //
+  // Medan klockan går ligger en ärlig telefon nedåt mot något, och ingen
+  // trycker på den eller sveper fram navigeringsfältet. Båda är alltså bevis
+  // på att telefonen är i en hand, och klockan fryser som vid ett lyft. Den
+  // går igen först när telefonen vänts upp och lagts ner på nytt
+  // (touchLockRef).
+  //
+  // Beröringen fångas i capture-fasen och svarar `false`, så den ser varje
+  // tryck utan att ta det från knappen under. Systemknapparna ligger utanför
+  // fönstret och syns inte här — därför är fältet gömt medan klockan går
+  // (lib/pauseNavBar.ts), och svepet som tar fram det är det som fångas.
+  const freezeInHand = (source: 'touch' | 'nav_bar') => {
+    if (isPodFlowRef.current || !restingRef.current || !hasRestedRef.current) return;
+    const now = Date.now();
+    touchLockRef.current = true;
+    restingRef.current = false;
+    faceChangedAtRef.current = null;
+    if (!isSleep) playCue(faceUpPlayer);
+    noteLifted(now);
+    console.log('FaceDown: hand medan klockan gick (', source, ') → PHONE_LIFTED');
+    track('pause_touched', { kind: isSleep ? 'sleep' : 'pause', source });
+    dispatch({ type: 'PHONE_LIFTED' });
+  };
+  const freezeOnTouch = () => { freezeInHand('touch'); return false; };
+
+  // ── Navigeringsfältet (bara Android) ──
+  // Gömt medan klockan går, framme annars — vid vila, efter ett lyft och när
+  // skärmen lämnas. Fram kommer det bara på två sätt: appen visar det, eller
+  // en hand sveper fram det. Appens egna växlingar ger samma händelse, så
+  // en händelse inom NAV_BAR_SETTLE_MS från en växling räknas inte.
+  const navBarToggledAtRef = useRef(0);
+  useEffect(() => {
+    if (isPodFlowRef.current) return;
+    navBarToggledAtRef.current = Date.now();
+    if (state.phase === 'active' && hasRestedRef.current) hideNavBar();
+    else showNavBar();
+  }, [state.phase]);
+  useEffect(() => {
+    if (isPodFlowRef.current) return;
+    const off = onNavBarShown(() => {
+      if (!appActiveRef.current) return;
+      if (Date.now() - navBarToggledAtRef.current < NAV_BAR_SETTLE_MS) return;
+      freezeInHand('nav_bar');
+    });
+    return () => { off(); showNavBar(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const titleText = isSleep ? 'Sleeping...' : isRegulate ? 'Regulate in progress...' : 'Pausing...';
   // Samma ord, samma röda knapp och samma håll för natten som för pausen —
   // att avsluta ska inte se ut som att börja. Bara skärmläsaren får veta
@@ -736,7 +859,7 @@ function PausingScreen() {
   const finishA11y = isSleep ? 'Finish the night' : 'Finish pause';
 
   return (
-    <View style={styles.container}>
+    <View style={styles.container} onStartShouldSetResponderCapture={freezeOnTouch}>
       {/* Ingen svepning bakåt under en natt — se BackHandler ovan. */}
       {isSleep && <Stack.Screen options={{ gestureEnabled: false }} />}
       <View style={styles.pulseContainer}>

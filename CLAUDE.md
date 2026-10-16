@@ -907,6 +907,28 @@ Status i appen: alla fyra är implementerade. Se
   sensorn tystnar i bakgrunden och lyftet aldrig kom. Trösklarna är
   startvärden; `pause_left_app` loggar topparna så att de kan kalibreras och
   så att det syns om ärliga pauser (en soffa, en säng) fryses av grinden.
+  **I bakgrunden får sensorn starta klockan igen bara om telefonen lagt sig
+  still** (`appActiveRef`, `assessSettled`, händelsen
+  `pause_settled_after_leave`). Sensorn levererar 0,3–1 s efter att appen
+  lämnats, och utan villkoret "lades" en telefon som hölls nedåtvänd i
+  luften när hemknappen trycktes ner igen 400 ms efter att grinden fryst
+  den — sedan tystnade sensorn och klockan gick medan man scrollade. Att
+  förbjuda omstarten helt prövades och var fel: samma omstart räddade
+  ärliga pauser i testveckan, dels Android-telefoner vars accelerometer
+  brusar över grinden på ett bord (0,3–0,6 m/s² vid 0,02°/s), dels telefoner
+  som låses i samma rörelse som de läggs ner. Provet läser därför bara
+  gyrot, i ett kort fönster (`SETTLE_WINDOW_MS`). **En beröring medan klockan går fryser
+  den** (`freezeOnTouch`, händelsen `pause_touched`), för ett bord rör aldrig
+  skärmen, och klockan går igen först när telefonen vänts upp och lagts ner
+  på nytt. Systemknapparna ligger utanför appen, så **på Android är
+  navigeringsfältet gömt medan klockan går** ([lib/pauseNavBar.ts](lib/pauseNavBar.ts),
+  `expo-navigation-bar`), och svepet som tar fram det fryser klockan på samma
+  sätt (`source: 'nav_bar'`). Beteendet är `inset-swipe` — med
+  `overlay-swipe` visas fältet ovanpå appen utan att appen får veta det.
+  Modulen läses valfritt, så en dev-build utan den kör som förut i stället
+  för att krascha. Med gestnavigering går hemsvepet troligen igenom direkt
+  även med dolt fält; där är det stillhetsgrinden som gäller. iOS
+  hemindikator går inte att gömma så att svepet syns för appen.
   Det som återstår är inte vattentätt: lägg
   telefonen nedåt, lås, vänd upp och lås upp så går klockan medan man
   scrollar. Riktig spärr kräver Screen Time (iOS) respektive
@@ -1733,10 +1755,13 @@ inte regeln.
   `pending_target_seconds` och RPC:n svarar med ribban som faktiskt gäller.
   `enableDailyReminder()` anropas från `setDailyGoal()` — se notisavsnittet
   högst upp.
-- **Utan mål står rubriken `Ready for a pause?` kvar** — ingen ska mötas av en
-  tom ring. Uppmaningen *Set a daily goal* under den visas **bara utan krets**:
-  kretsfliken ber redan om samma sak, och där hänger dessutom veckans bedrift
-  på den.
+- **Utan mål står ringen ändå, tom, med *Set a goal* inuti** — ett tryck
+  öppnar ratten. Förr stod bara rubriken `Ready for a pause?` med en länk
+  *Set a daily goal* under, och länken doldes med krets och efter *Set up
+  later*. Testare med nya konton såg då ingen ring alls och hittade målet bara
+  via kretsfliken. Tomringen visas för alla, med eller utan krets: den är
+  samma yta som sedan fylls, inte en uppmaning till. (Rubrikgrenen finns kvar
+  bara för `HOME_RING_VIEW = false`.)
 - **Solo-läget visar ringen och ingenting mer.** Potten, stegen, nivåmärket,
   flödet och reaktionerna kräver alla en krets och syns inte — och orden runt
   ringen nämner varken *circle* eller *together*, för det finns ingen och

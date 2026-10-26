@@ -41,3 +41,6 @@ app-example
 # generated native folders
 /ios
 /android
+
+# Lådans hemligheter (WiFi + boxnyckel)
+firmware/**/secrets.h

@@ -1,5 +1,5 @@
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
-import { router, Stack, usePathname, useSegments } from 'expo-router';
+import { router, Stack, useGlobalSearchParams, usePathname, useSegments } from 'expo-router';
 import * as Notifications from 'expo-notifications';
 import { DeviceMotion } from 'expo-sensors';
 import { StatusBar } from 'expo-status-bar';
@@ -14,6 +14,7 @@ import { SessionProvider, useSession } from '../context/SessionContext';
 import { AuthProvider, useAuth } from '../contexts/AuthContext';
 import { initAnalytics, track } from '../lib/analytics';
 import { isIntroDeferred } from '../lib/introPrefs';
+import { normalizePairCode, setPendingPairCode, takePendingPairCode } from '../lib/tagPairing';
 import {
   CIRCLE_CHAT_TYPE, CIRCLE_GOAL_TYPE, PAUSE_INVITE_TYPE, SUPPORT_RECEIVED_TYPE, SUPPORT_REQUEST_TYPE,
   cancelDailyReminder, initNotifications,
@@ -75,6 +76,15 @@ function InnerLayout() {
   // inloggningen medan inloggningen pågår.
   const segments = useSegments();
   const onAuthCallback = segments[0] === 'auth' && segments[1] === 'callback';
+  // En QR-kod från lådan (`pauseapp://pair?code=…`) som öppnade appen.
+  // Grinden nedan byter rutt till flikarna vid start, så koden plockas upp
+  // här och läggs tillbaka ovanpå flikarna — se app/pair.tsx.
+  const globalParams = useGlobalSearchParams<{ code?: string }>();
+  const linkPairCodeRef = useRef<string | null>(null);
+  linkPairCodeRef.current =
+    segments[0] === 'pair' && typeof globalParams.code === 'string'
+      ? normalizePairCode(globalParams.code) || null
+      : null;
 
   // Skärmvisningarna räknas härifrån och ingen annanstans. Varje skärm hade
   // kunnat ropa själv, men då saknar varje ny skärm sin rad tills någon
@@ -611,14 +621,23 @@ function InnerLayout() {
     // en väg tillbaka så länge bara den andra är satt.
     const pendingTap = pendingTapRef.current;
     pendingTapRef.current = null;
+    const linkPairCode = linkPairCodeRef.current;
     if (!onboardingCompleted && !introDeferred) {
-      // Introduktionen går före; ett tryck därifrån släpps.
+      // Introduktionen går före; ett tryck därifrån släpps. En lådkod parkeras
+      // i stället — den gäller i fem minuter och kan matas in i Settings.
+      if (linkPairCode) setPendingPairCode(linkPairCode);
       router.replace('/intro' as never);
     } else {
       router.replace('/(tabs)' as never);
       // Ett tick senare, så att flikarna hunnit monteras innan trycket
       // navigerar vidare in i dem.
       if (pendingTap) setTimeout(() => openFromNotificationRef.current?.(pendingTap), 0);
+      // Lådans kod: från länken som startade appen, eller parkerad av
+      // app/pair.tsx medan ingen var inloggad.
+      takePendingPairCode().then(saved => {
+        const code = linkPairCode ?? saved;
+        if (code) setTimeout(() => router.push({ pathname: '/pair', params: { code } } as never), 0);
+      });
     }
   }, [loading, user, onboardingCompleted, introDeferred, onAuthCallback]);
 
@@ -662,6 +681,7 @@ function InnerLayout() {
         <Stack.Screen name="stats" options={{ headerShown: false }} />
         <Stack.Screen name="profile" options={{ headerShown: false }} />
         <Stack.Screen name="add-friend" options={{ headerShown: false }} />
+        <Stack.Screen name="pair" options={{ headerShown: false }} />
         <Stack.Screen name="friend-wrapped" options={{ headerShown: false, animation: 'fade' }} />
         <Stack.Screen name="my-wrapped" options={{ headerShown: false, animation: 'fade' }} />
         <Stack.Screen name="circle-wrapped" options={{ headerShown: false, animation: 'fade' }} />

@@ -288,6 +288,22 @@ function SettingsScreen() {
         </View>
       </View>
 
+      {/* PAUSE POD: taggregistrering — samma skärm som lådans QR-kod öppnar */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Pause Pod</Text>
+        <Text style={styles.sectionSubtitle}>
+          New tag on your phone? Enter the code from the box.
+        </Text>
+        <TouchableOpacity
+          style={styles.chip}
+          onPress={() => router.push('/pair' as never)}
+          accessibilityRole="button"
+        >
+          <FontAwesome5 name="tag" size={12} color={Palette.accent} />
+          <Text style={styles.chipLabel}>Register a Pause tag</Text>
+        </TouchableOpacity>
+      </View>
+
       {/* Save button */}
       <TouchableOpacity
         style={[styles.saveButton, saved && styles.saveButtonDone]}

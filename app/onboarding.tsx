@@ -1,13 +1,14 @@
 import { Entypo, FontAwesome, FontAwesome5 } from '@expo/vector-icons';
 import * as FileSystem from 'expo-file-system/legacy';
-import { router, useNavigation } from 'expo-router';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Keyboard, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { router, useFocusEffect, useNavigation } from 'expo-router';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, Keyboard, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { AppPalette, Radius, Spacing, alpha, darkPalette, lightPalette } from '../constants/appTheme';
 import { RoomProvider, ThemePreference, usePalette, useTheme } from '../contexts/ThemeContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { roomShell, ScreenBackground } from '../components/screen-background';
 import { track } from '../lib/analytics';
+import { fetchMyTags, formatTagUid, type MyTag, removeMyTag } from '../lib/tagPairing';
 import DismissKeyboardView from './components/DismissKeyboardView';
 import { Category, DEFAULT_CATEGORIES, saveSelectedCategories } from './pauseLogger';
 
@@ -72,6 +73,44 @@ function SettingsScreen() {
   const [saved, setSaved] = useState(false);
   const [hasChanges, setHasChanges] = useState(false);
   const [unsavedAction, setUnsavedAction] = useState<any>(null);
+  // `null` = inte hämtat (eller nätet föll); `[]` = inga taggar.
+  const [myTags, setMyTags] = useState<MyTag[] | null>(null);
+
+  // Vid varje fokus: man kommer tillbaka hit från /pair med en ny tagg.
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+      fetchMyTags().then(tags => {
+        if (alive) setMyTags(tags);
+      });
+      return () => {
+        alive = false;
+      };
+    }, []),
+  );
+
+  const confirmRemoveTag = (tag: MyTag) => {
+    Alert.alert(
+      'Remove this tag?',
+      'The box will no longer recognise this phone. You can register the tag again later.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            const ok = await removeMyTag(tag.id);
+            if (ok) {
+              track('pause_tag_removed');
+              setMyTags(prev => (prev ?? []).filter(t => t.id !== tag.id));
+            } else {
+              Alert.alert("Couldn't remove the tag", 'Check your connection and try again.');
+            }
+          },
+        },
+      ],
+    );
+  };
   const navigation = useNavigation();
 
   const originalCategories = useRef<string[]>([]);
@@ -292,15 +331,43 @@ function SettingsScreen() {
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Pause Pod</Text>
         <Text style={styles.sectionSubtitle}>
-          New tag on your phone? Enter the code from the box.
+          {myTags && myTags.length > 0
+            ? 'The box says hi when it reads these tags.'
+            : 'New tag on your phone? Enter the code from the box.'}
         </Text>
+        {myTags && myTags.length > 0 && (
+          <View style={styles.tagList}>
+            {myTags.map(tag => (
+              <View key={tag.id} style={styles.tagRow}>
+                <FontAwesome5 name="tag" size={13} color={Palette.accent} />
+                <View style={styles.tagText}>
+                  <Text style={styles.tagName}>{tag.label ?? 'Pause tag'}</Text>
+                  <Text style={styles.tagMeta}>
+                    {formatTagUid(tag.tagUid)} · added{' '}
+                    {new Date(tag.createdAt).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  onPress={() => confirmRemoveTag(tag)}
+                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Remove tag ${formatTagUid(tag.tagUid)}`}
+                >
+                  <FontAwesome5 name="times" size={14} color={Palette.danger} />
+                </TouchableOpacity>
+              </View>
+            ))}
+          </View>
+        )}
         <TouchableOpacity
           style={styles.chip}
           onPress={() => router.push('/pair' as never)}
           accessibilityRole="button"
         >
           <FontAwesome5 name="tag" size={12} color={Palette.accent} />
-          <Text style={styles.chipLabel}>Register a Pause tag</Text>
+          <Text style={styles.chipLabel}>
+            {myTags && myTags.length > 0 ? 'Register another tag' : 'Register a Pause tag'}
+          </Text>
         </TouchableOpacity>
       </View>
 
@@ -455,6 +522,32 @@ const makeStyles = (Palette: AppPalette) => StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 7,
+  },
+  tagList: {
+    gap: 8,
+    marginBottom: 16,
+  },
+  tagRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    backgroundColor: Palette.surfaceAlt,
+    borderRadius: Radius.md,
+  },
+  tagText: {
+    flex: 1,
+    gap: 2,
+  },
+  tagName: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: Palette.textPrimary,
+  },
+  tagMeta: {
+    fontSize: 13,
+    color: Palette.textTertiary,
   },
   chip: {
     flexDirection: 'row',

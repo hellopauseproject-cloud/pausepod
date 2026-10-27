@@ -44,8 +44,11 @@ enum State { EMPTY, CHECKING, UNKNOWN_TAG, KNOWN_TAG, OFFLINE };
 State state = EMPTY;
 String currentUid = "";
 String currentCode = "";
-int missCount = 0;
-const int MISS_LIMIT = 3;              // missade läsningar i rad = telefonen är borta
+// Telefonen räknas som borttagen först när ingen läsning lyckats på så här
+// länge. Billiga läsare missar enstaka läsningar även när taggen ligger still,
+// och ett räknat antal missar (förr 3 st = 0,3 s) gjorde att QR-koden blinkade.
+unsigned long lastSeenMs = 0;
+const unsigned long REMOVED_AFTER_MS = 1500;
 unsigned long lastPoll = 0;
 const unsigned long POLL_MS = 3000;    // hur ofta boxen frågar om QR-koden använts
 
@@ -241,11 +244,15 @@ void loop() {
       Serial.printf("Läsaren svarar inte rätt (0x%02X), startar om den\n",
                     rfid.PCD_ReadRegister(MFRC522::VersionReg));
       startReader();
+      lastSeenMs = millis();   // omstarten tappar taggen en stund
     }
   }
 
-  if (readTag(uid)) {
-    missCount = 0;
+  // En miss provas om direkt: kopiorna svarar ofta varannan gång.
+  bool seen = readTag(uid) || readTag(uid);
+
+  if (seen) {
+    lastSeenMs = millis();
 
     if (uid != currentUid) {
       // Ny telefon lagd i boxen
@@ -255,21 +262,19 @@ void loop() {
       showMessage("Hello!", "Checking...");
       checkTag(uid);
       lastPoll = millis();
+      lastSeenMs = millis();   // anropet tog tid; räkna inte den tiden som borta
     } else if ((state == UNKNOWN_TAG || state == OFFLINE) && millis() - lastPoll > POLL_MS) {
       // Väntar på att någon ska skanna QR-koden (eller på nätet)
       checkTag(uid);
       lastPoll = millis();
+      lastSeenMs = millis();
     }
-  } else if (currentUid != "") {
-    missCount++;
-    if (missCount >= MISS_LIMIT) {
-      Serial.println("Telefonen togs bort");
-      currentUid = "";
-      currentCode = "";
-      missCount = 0;
-      state = EMPTY;
-      showMessage("Pause Pod", "Place your phone");
-    }
+  } else if (currentUid != "" && millis() - lastSeenMs > REMOVED_AFTER_MS) {
+    Serial.println("Telefonen togs bort");
+    currentUid = "";
+    currentCode = "";
+    state = EMPTY;
+    showMessage("Pause Pod", "Place your phone");
   }
 
   delay(100);

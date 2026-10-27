@@ -107,3 +107,42 @@ export async function takePendingPairCode(): Promise<string | null> {
     return null;
   }
 }
+
+/* ---------- De egna taggarna (Settings) ----------
+ *
+ * Läses direkt mot `pause_tags`: RLS släpper bara igenom egna rader, och
+ * klienten får bara uppdatera `label` och `deactivated_at`. En borttagen tagg
+ * raderas inte utan inaktiveras, så att lådan slutar känna igen den men
+ * historiken står kvar — och taggen kan registreras igen, av en själv eller
+ * någon annan.
+ */
+
+export type MyTag = { id: string; tagUid: string; label: string | null; createdAt: string };
+
+export async function fetchMyTags(): Promise<MyTag[] | null> {
+  const { data, error } = await supabase
+    .from('pause_tags')
+    .select('id, tag_uid, label, created_at')
+    .is('deactivated_at', null)
+    .order('created_at', { ascending: true });
+  if (error) return null;
+  return (data ?? []).map(r => ({
+    id: r.id as string,
+    tagUid: r.tag_uid as string,
+    label: (r.label as string | null) ?? null,
+    createdAt: r.created_at as string,
+  }));
+}
+
+/** Sant om raden faktiskt ändrades (RLS som nekar ger inget fel, bara noll rader). */
+export async function removeMyTag(id: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('pause_tags')
+    .update({ deactivated_at: new Date().toISOString() })
+    .eq('id', id)
+    .select('id');
+  return !error && (data?.length ?? 0) > 0;
+}
+
+/** `9B3C31CA` → `9B 3C 31 CA`, som lådan och testkoden skriver det. */
+export const formatTagUid = (uid: string) => uid.match(/.{1,2}/g)?.join(' ') ?? uid;

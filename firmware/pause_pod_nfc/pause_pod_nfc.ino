@@ -50,6 +50,23 @@ unsigned long lastPoll = 0;
 const unsigned long POLL_MS = 3000;    // hur ofta boxen frågar om QR-koden använts
 
 // ---------- RFID ----------
+void startReader() {
+  rfid.PCD_Init();
+  delay(50);
+  rfid.PCD_SetAntennaGain(rfid.RxGain_max);   // kopior (0x88) läser ofta bättre med full förstärkning
+  rfid.PCD_DumpVersionToSerial();
+}
+
+// Läsaren svarar med sin version om allt är som det ska. 0x00/0xFF eller ett
+// konstigt värde betyder att den tappat bort sig (glapp eller spänningsdipp).
+bool readerOk() {
+  byte v = rfid.PCD_ReadRegister(MFRC522::VersionReg);
+  return v == 0x88 || v == 0x90 || v == 0x91 || v == 0x92 || v == 0x12 || v == 0xB2;
+}
+
+unsigned long lastReaderCheck = 0;
+const unsigned long READER_CHECK_MS = 5000;
+
 bool readTag(String &uid) {
   byte atqa[2];
   byte size = sizeof(atqa);
@@ -200,15 +217,16 @@ void setup() {
   gfx->begin();
   showMessage("Pause Pod", "Connecting WiFi...");
 
-  SPI.begin(12, 13, 11, SS_PIN);
-  rfid.PCD_Init();
-  rfid.PCD_DumpVersionToSerial();
-
+  // WiFi först: när radion slås på dyker spänningen en kort stund, och då kan
+  // en läsare som redan startats tappa sina inställningar.
   if (ensureWifi()) {
     Serial.println("WiFi OK: " + WiFi.localIP().toString());
   } else {
     Serial.println("Kunde inte ansluta till WiFi, försöker igen när en tagg läggs på");
   }
+
+  SPI.begin(12, 13, 11, SS_PIN);
+  startReader();
 
   showMessage("Pause Pod", "Place your phone");
 }
@@ -216,6 +234,15 @@ void setup() {
 // ---------- Loop ----------
 void loop() {
   String uid;
+
+  if (millis() - lastReaderCheck > READER_CHECK_MS) {
+    lastReaderCheck = millis();
+    if (!readerOk()) {
+      Serial.printf("Läsaren svarar inte rätt (0x%02X), startar om den\n",
+                    rfid.PCD_ReadRegister(MFRC522::VersionReg));
+      startReader();
+    }
+  }
 
   if (readTag(uid)) {
     missCount = 0;

@@ -49,12 +49,17 @@ Deno.serve(async (req) => {
   const boxKey = req.headers.get("x-box-key") ?? "";
   if (!boxId || !boxKey) return json({ error: "missing_box_credentials" }, 401);
 
-  const { data: box } = await admin
+  const { data: box, error: boxError } = await admin
     .from("boxes")
     .select("id, key_hash, active")
     .eq("id", boxId)
     .maybeSingle();
+  if (boxError) {
+    console.error("box-tag: kunde inte läsa boxes", boxError);
+    return json({ error: "db_error" }, 500);
+  }
   if (!box || !box.active || box.key_hash !== (await sha256Hex(boxKey))) {
+    console.warn(`box-tag: nekad låda ${boxId} (finns: ${!!box})`);
     return json({ error: "invalid_box" }, 401);
   }
   await admin.from("boxes").update({ last_seen_at: new Date().toISOString() }).eq("id", boxId);
@@ -70,18 +75,16 @@ Deno.serve(async (req) => {
   if (tagUid.length < 8 || tagUid.length > 20) return json({ error: "invalid_tag_uid" }, 400);
 
   // ---- Känd tagg? ----
-  const { data: tag } = await admin
-    .from("pause_tags")
-    .select("user_id, profiles(username)")
-    .eq("tag_uid", tagUid)
-    .is("deactivated_at", null)
-    .maybeSingle();
-
-  if (tag) {
-    // deno-lint-ignore no-explicit-any
-    const username = (tag as any).profiles?.username ?? "friend";
-    return json({ status: "known", username });
+  // Via en definer-funktion: lådan ska kunna säga hej utan att funktionen
+  // behöver läsrätt på hela profiles.
+  const { data: username, error: ownerError } = await admin.rpc("tag_owner_username", {
+    p_tag_uid: tagUid,
+  });
+  if (ownerError) {
+    console.error("box-tag: kunde inte slå upp taggen", ownerError);
+    return json({ error: "db_error" }, 500);
   }
+  if (username) return json({ status: "known", username });
 
   // ---- Okänd: återanvänd en giltig kod, annars skapa en ny ----
   const now = new Date();
@@ -114,7 +117,10 @@ Deno.serve(async (req) => {
     if (!error) {
       return json({ status: "unknown", code, url: PAIR_URL + code, expires_at: expiresAt });
     }
-    if (error.code !== "23505") return json({ error: "db_error" }, 500); // annat än krock
+    if (error.code !== "23505") {
+      console.error("box-tag: kunde inte skapa kod", error);
+      return json({ error: "db_error" }, 500);
+    }
   }
   return json({ error: "could_not_create_code" }, 500);
 });

@@ -60,3 +60,25 @@ revoke all on public.pause_tags from anon, authenticated;
 grant select on public.pause_tags to authenticated;
 grant update (label, deactivated_at) on public.pause_tags to authenticated;
 revoke all on public.boxes, public.tag_pairing_codes from authenticated, anon;
+
+-- Edge-funktionerna (service_role) får arbeta i de tre nya tabellerna. Den
+-- riktiga databasen delar inte ut DML till service_role som förval, så utan
+-- raden ser box-tag aldrig sina lådor och svarar invalid_box.
+grant select, insert, update, delete on public.boxes, public.pause_tags, public.tag_pairing_codes to service_role;
+
+-- Lådan behöver bara ägarens användarnamn, inte läsrätt på profiles.
+create or replace function public.tag_owner_username(p_tag_uid text)
+returns text
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select p.username
+  from public.pause_tags t
+  join public.profiles p on p.id = t.user_id
+  where t.tag_uid = p_tag_uid and t.deactivated_at is null
+  limit 1;
+$$;
+revoke execute on function public.tag_owner_username(text) from public, anon, authenticated;
+grant execute on function public.tag_owner_username(text) to service_role;

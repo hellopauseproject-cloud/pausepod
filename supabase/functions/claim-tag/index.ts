@@ -1,5 +1,7 @@
 // claim-tag: anropas av appen när en inloggad användare har skannat
-// QR-koden på boxen.
+// QR-koden på boxen. Funktionen kontrollerar själv inloggningen
+// (admin.auth.getUser), så den driftsätts utan gatewayns JWT-kontroll
+// (--no-verify-jwt), som notify-circle-goal-reached.
 //
 // supabase.functions.invoke("claim-tag", { body: { code, preview } })
 //
@@ -40,6 +42,7 @@ Deno.serve(async (req) => {
 
   // ---- Vem är inloggad? ----
   const jwt = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "");
+  if (!jwt) return json({ ok: false, error: "not_signed_in" }, 401);
   const { data: userData } = await admin.auth.getUser(jwt);
   const user = userData?.user;
   if (!user) return json({ ok: false, error: "not_signed_in" }, 401);

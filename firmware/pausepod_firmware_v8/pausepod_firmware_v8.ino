@@ -5,7 +5,7 @@
 //
 // 1. Lådan själv (NFC). Telefonen med sin registrerade Pause-tagg läggs i
 //    lådan → displayen säger HI, <NAMN> → locket stängs → pausen startar
-//    (bocken → PAUSE STARTED → 1 2 3 4 5 → loggan). Ingen app behövs.
+//    (bocken → CLOCK ON. → 00:01–00:05 → märket). Ingen app behövs.
 //    Okänd tagg → QR-koden för registrering, som i pause_pod_nfc.
 //    Pausen sparas av lådan själv via WiFi (edge-funktionen box-session),
 //    också när appen är stängd.
@@ -530,72 +530,109 @@ void requestLookup(const char* uid) {
 }
 
 // ─── Display ────────────────────────────────────────────────
+//
+// Skärmen följer PausePod-designsystemet, och lådan bor i appens NATTRUM
+// (app-night-*): det är rummet där en paus pågår, och det är mörkt i båda
+// lägena. Det betyder:
+//
+//  - Marinblå botten, gräddvitt bläck (aldrig rent vitt eller grått).
+//  - Pausmärket — två stående rundade staplar — i appens accent #2e86de.
+//    Det är det enda "ifyllda" på skärmen, som PAUSE-knappen i appen.
+//  - Rummets ljusblå (night-hue) för etiketter och mätare.
+//  - Grönt är lådans bekräftelse och syns bara i startceremonins bock.
+//  - Honung är den varma vändningen: ON HOLD och PAUSE DONE.
+//  - Rubriker i versaler, tjocka (närmast Arial Black som går att få ur
+//    TFT_eSPI: FreeSansBold ritad två gånger med en pixels förskjutning).
+//    Instruktioner på tre till fyra ord, inga utropstecken, inga pronomen.
+//  - Mätare är stående rundade staplar, som märket.
+//  - Bakgrunden rör sig inte. Bara märket andas på startsidan.
+//
+// Utan PSRAM ritas skärmen i 8 bitar, och då blir marinblått svart och
+// tonerna grövre. Slå på Verktyg → PSRAM → "OPI PSRAM" för rätt färger.
 
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite sprite = TFT_eSprite(&tft);
 bool spriteOK = false;
 
-uint16_t BLUE, BLUE_GLOW, BLUE_DIM, GREEN, BG;
+struct Rgb { uint8_t r, g, b; };
+
+// Ur designsystemet (tokens.json i PausePod-systemet)
+const Rgb C_BG     = {0x0b, 0x16, 0x30};  // app-night-bg
+const Rgb C_SURF   = {0x16, 0x24, 0x4a};  // app-night-surface
+const Rgb C_LINE   = {0x1d, 0x2d, 0x58};  // app-night-surface-alt: spår, tomma staplar
+const Rgb C_HUE    = {0x8c, 0xbc, 0xff};  // app-night-hue: etiketter, mätare
+const Rgb C_ACCENT = {0x2e, 0x86, 0xde};  // app-accent: pausmärket
+const Rgb C_INK    = {0xff, 0xf4, 0xec};  // gräddvitt bläck, rgba(255,244,236,a)
+const Rgb C_HONEY  = {0xf0, 0xb9, 0x78};  // honey: den varma vändningen
+const Rgb C_GREEN  = {0x3c, 0xc8, 0x78};  // lådans GREEN: bara bocken
+
+uint16_t BG, SURF, LINE, HUE, ACCENT, INK, INK_2, INK_3, HONEY, GREEN;
+
+uint16_t col(Rgb c) { return tft.color565(c.r, c.g, c.b); }
+
+// a → b, k = 0..1. Används för toningar och för bläckets alfanivåer.
+uint16_t mix(Rgb a, Rgb b, float k) {
+  if (k < 0.0) k = 0.0;
+  if (k > 1.0) k = 1.0;
+  return tft.color565(a.r + (b.r - a.r) * k + 0.5,
+                      a.g + (b.g - a.g) * k + 0.5,
+                      a.b + (b.b - a.b) * k + 0.5);
+}
+
+// En färg tonad upp ur botten.
+uint16_t fadeIn(Rgb c, float k) { return mix(C_BG, c, k); }
+
+void initColors() {
+  BG     = col(C_BG);
+  SURF   = col(C_SURF);
+  LINE   = col(C_LINE);
+  HUE    = col(C_HUE);
+  ACCENT = col(C_ACCENT);
+  INK    = col(C_INK);
+  INK_2  = mix(C_BG, C_INK, 0.68);   // brödtext
+  INK_3  = mix(C_BG, C_INK, 0.50);   // tredje nivån, aldrig under 0.5
+  HONEY  = col(C_HONEY);
+  GREEN  = col(C_GREEN);
+}
 
 const int SCREEN_W = 320;
 const int SCREEN_H = 170;
 const int CENTER_X = 160;
 const int CENTER_Y = 85;
-const int ICON_SIZE_LOGO = 14;
-const int ICON_SIZE_PAUSE_LARGE = 50;
 const int RING_R = 46;
 const unsigned long BREATH_CYCLE_MS = 8000;
 
 unsigned long lastFrame = 0;
 const unsigned long FRAME_INTERVAL_MS = 33;
 
-uint16_t blueAt(float k) {
-  if (k < 0.0) k = 0.0;
-  if (k > 1.0) k = 1.0;
-  return tft.color565((uint8_t)(46 * k + 0.5), (uint8_t)(134 * k + 0.5), (uint8_t)(222 * k + 0.5));
+// ── Former ──
+
+// Pausmärket: två stående staplar med helt rundade ändar.
+void drawPauseMark(int cx, int cy, int h, uint16_t color) {
+  int w   = max(4, (h * 10) / 36);
+  int gap = max(3, (w * 4) / 5);
+  int x   = cx - w - gap / 2;
+  int y   = cy - h / 2;
+  sprite.fillSmoothRoundRect(x, y, w, h, w / 2, color);
+  sprite.fillSmoothRoundRect(x + w + gap, y, w, h, w / 2, color);
 }
 
-uint16_t greenAt(float k) {
-  if (k < 0.0) k = 0.0;
-  if (k > 1.0) k = 1.0;
-  return tft.color565((uint8_t)(60 * k + 0.5), (uint8_t)(200 * k + 0.5), (uint8_t)(120 * k + 0.5));
-}
-
-void drawPauseIcon(int cx, int cy, int size, uint16_t color) {
-  int barW = max(3, size / 4);
-  int barH = size;
-  int gap  = barW + 2;
-  int leftX = cx - gap / 2 - barW;
-  int topY  = cy - barH / 2;
-  sprite.fillRoundRect(leftX, topY, barW, barH, 2, color);
-  sprite.fillRoundRect(leftX + barW + gap, topY, barW, barH, 2, color);
-}
-
-void drawArc(int cx, int cy, int r, int thickness, float startDeg, float endDeg, uint16_t color) {
-  if (endDeg <= startDeg || r <= 0) return;
-  float step = 360.0 / (PI * r);
-  if (step < 1.0) step = 1.0;
-  for (float a = startDeg; a <= endDeg; a += step) {
-    float rad = a * DEG_TO_RAD;
-    sprite.fillCircle(cx + cos(rad) * r, cy + sin(rad) * r, thickness / 2, color);
+// En pill: helt rundad rektangel. Med `ring` ritas bara en 2 px kant runt
+// `fill` — designsystemets ring-line i stället för skugga.
+void drawPill(int cx, int cy, int w, int h, uint16_t fill, uint16_t ring) {
+  int x = cx - w / 2, y = cy - h / 2;
+  if (ring != fill) {
+    sprite.fillSmoothRoundRect(x, y, w, h, h / 2, ring);
+    sprite.fillSmoothRoundRect(x + 2, y + 2, w - 4, h - 4, h / 2 - 2, fill);
+  } else {
+    sprite.fillSmoothRoundRect(x, y, w, h, h / 2, fill);
   }
 }
 
-void drawProgressRing(int cx, int cy, int r, int thickness, float progress, uint16_t fg) {
-  float end = -90.0 + 360.0 * progress;
-  if (progress < 0.999) drawArc(cx, cy, r, thickness, end, 270, BLUE_DIM);
-  if (progress > 0.005) drawArc(cx, cy, r, thickness, -90, end, fg);
-}
-
-void drawThickLine(int x0, int y0, int x1, int y1, int thickness, uint16_t color) {
-  float dx = x1 - x0, dy = y1 - y0;
-  float len = sqrt(dx * dx + dy * dy);
-  if (len < 1) { sprite.fillCircle(x0, y0, thickness / 2, color); return; }
-  int steps = (int)len;
-  for (int i = 0; i <= steps; i++) {
-    float t = i / (float)steps;
-    sprite.fillCircle(x0 + dx * t, y0 + dy * t, thickness / 2, color);
-  }
+// Hel ring, kantutjämnad.
+void drawRing(int cx, int cy, int r, int thickness, uint16_t color) {
+  sprite.fillSmoothCircle(cx, cy, r + thickness / 2, color);
+  sprite.fillSmoothCircle(cx, cy, r - thickness / 2, BG);
 }
 
 void drawCheck(int cx, int cy, int size, int thickness, float progress, uint16_t color) {
@@ -607,13 +644,65 @@ void drawCheck(int cx, int cy, int size, int thickness, float progress, uint16_t
   const float SHORT_PART = 0.35;
   if (progress <= SHORT_PART) {
     float t = progress / SHORT_PART;
-    drawThickLine(ax, ay, ax + (bx - ax) * t, ay + (by - ay) * t, thickness, color);
+    sprite.drawWideLine(ax, ay, ax + (bx - ax) * t, ay + (by - ay) * t, thickness, color);
   } else {
     float t = (progress - SHORT_PART) / (1.0 - SHORT_PART);
-    drawThickLine(ax, ay, bx, by, thickness, color);
-    drawThickLine(bx, by, bx + (ex - bx) * t, by + (ey - by) * t, thickness, color);
+    sprite.drawWideLine(ax, ay, bx, by, thickness, color);
+    sprite.drawWideLine(bx, by, bx + (ex - bx) * t, by + (ey - by) * t, thickness, color);
   }
 }
+
+// Mjuk gloria bakom pausmärket. Står still — det är inte bakgrunden som rör
+// sig, det är märket som lyser.
+void drawHalo(int cx, int cy, int r, float k) {
+  for (int i = 0; i < 7; i++) {
+    sprite.fillSmoothCircle(cx, cy, r - i * 5, fadeIn(C_ACCENT, (0.05 + 0.035 * i) * k));
+  }
+}
+
+// ── Text ──
+
+// Rubrik: versaler, tjock. Ritas två gånger med en pixel emellan, för
+// TFT_eSPI har ingen Arial Black.
+void drawHeavy(const String& s, int x, int y, uint16_t color) {
+  sprite.setTextColor(color);
+  sprite.drawString(s, x, y);
+  sprite.drawString(s, x + 1, y);
+}
+
+// Största rubrikstorleken som får plats på `maxW`.
+void fitHeadline(const String& s, int maxW) {
+  sprite.setFreeFont(&FreeSansBold24pt7b);
+  if (sprite.textWidth(s) + 1 <= maxW) return;
+  sprite.setFreeFont(&FreeSansBold18pt7b);
+  if (sprite.textWidth(s) + 1 <= maxW) return;
+  sprite.setFreeFont(&FreeSansBold12pt7b);
+}
+
+// Liten etikett över en rubrik (designsystemets "kicker").
+void drawKicker(const char* s, int x, int y, uint16_t color) {
+  sprite.setFreeFont(&FreeSansBold9pt7b);
+  sprite.setTextColor(color);
+  sprite.drawString(s, x, y);
+}
+
+void drawBody(const char* s, int x, int y, uint16_t color) {
+  sprite.setFreeFont(&FreeSans9pt7b);
+  sprite.setTextColor(color);
+  sprite.drawString(s, x, y);
+}
+
+// Instruktion i en pill med ring, centrerad.
+void drawInstructionPill(const char* s, int cy, uint16_t text, uint16_t ring) {
+  sprite.setFreeFont(&FreeSansBold9pt7b);
+  int w = sprite.textWidth(s) + 40;
+  drawPill(CENTER_X, cy, w, 32, BG, ring);
+  sprite.setTextDatum(MC_DATUM);
+  sprite.setTextColor(text);
+  sprite.drawString(s, CENTER_X, cy);
+}
+
+// ── Tid ──
 
 float breathProgress(unsigned long elapsed) {
   elapsed = elapsed % BREATH_CYCLE_MS;
@@ -653,52 +742,87 @@ String displayName() {
 
 // ─── Renderare ──────────────────────────────────────────────
 
+// Ingen telefon: märket andas bredvid ordmärket.
 void renderLogo() {
   sprite.fillSprite(BG);
-  uint16_t c = blueAt(0.30 + 0.70 * breathProgress(millis() - phaseStartMs));
+  float b = breathProgress(millis() - phaseStartMs);
+
+  sprite.setFreeFont(&FreeSansBold18pt7b);
+  String word = "PAUSEPOD";
+  int wordW = sprite.textWidth(word) + 1;
+  const int markH = 34, markBox = 28, gap = 14;
+  int x0 = (SCREEN_W - (markBox + gap + wordW)) / 2;
+
+  drawPauseMark(x0 + markBox / 2, 72, markH, fadeIn(C_ACCENT, 0.45 + 0.55 * b));
   sprite.setTextDatum(ML_DATUM);
-  sprite.setTextColor(c, BG);
-  sprite.setFreeFont(&FreeSans9pt7b);
-  String text = "P A U S E   P O D";
-  int textW = sprite.textWidth(text);
-  int iconBoxW = ICON_SIZE_LOGO + 6;
-  int gap = 12;
-  int startX = (SCREEN_W - (iconBoxW + gap + textW)) / 2;
-  drawPauseIcon(startX + iconBoxW / 2, CENTER_Y, ICON_SIZE_LOGO, c);
-  sprite.drawString(text, startX + iconBoxW + gap, CENTER_Y);
-  sprite.pushSprite(0, 0);
-}
+  drawHeavy(word, x0 + markBox + gap, 72, INK);
 
-void renderTwoLines(const char* big, const char* small) {
-  sprite.fillSprite(BG);
-  uint16_t c = blueAt(0.55 + 0.45 * breathProgress(millis() - phaseStartMs));
   sprite.setTextDatum(MC_DATUM);
-  sprite.setTextColor(c, BG);
-  sprite.setFreeFont(&FreeSansBold12pt7b);
-  sprite.drawString(big, CENTER_X, CENTER_Y - 13);
-  sprite.setTextColor(blueAt(0.45), BG);
-  sprite.setFreeFont(&FreeSans9pt7b);
-  sprite.drawString(small, CENTER_X, CENTER_Y + 17);
+  drawBody("Phone in to start.", CENTER_X, 124, INK_2);
   sprite.pushSprite(0, 0);
 }
 
-// esp_qrcode ritar via en callback utan användardata, så storleken bor här.
+// Taggen läst, servern tillfrågad: märkets staplar turas om att lysa.
+void renderChecking() {
+  sprite.fillSprite(BG);
+  float t = ((millis() - phaseStartMs) % 1200) / 1200.0;
+  float kl = 0.5 + 0.5 * cos(t * 2 * PI);
+  const int h = 40, w = 11, gap = 9;
+  int x = CENTER_X - w - gap / 2;
+  sprite.fillSmoothRoundRect(x, 66 - h / 2, w, h, w / 2, fadeIn(C_ACCENT, 0.35 + 0.65 * kl));
+  sprite.fillSmoothRoundRect(x + w + gap, 66 - h / 2, w, h, w / 2, fadeIn(C_ACCENT, 0.35 + 0.65 * (1 - kl)));
+
+  sprite.setTextDatum(MC_DATUM);
+  drawBody("Checking the tag.", CENTER_X, 122, INK_2);
+  sprite.pushSprite(0, 0);
+}
+
+// Känd tagg: hälsningen och vad som händer härnäst.
+void renderHello() {
+  sprite.fillSprite(BG);
+  String hi = String("HI, ") + displayName();
+  sprite.setTextDatum(MC_DATUM);
+  fitHeadline(hi, SCREEN_W - 32);
+  drawHeavy(hi, CENTER_X, 62, INK);
+  drawInstructionPill("LID DOWN TO START", 118, HUE, LINE);
+  sprite.pushSprite(0, 0);
+}
+
+void renderOffline() {
+  sprite.fillSprite(BG);
+  drawPauseMark(CENTER_X, 50, 30, LINE);
+  sprite.setTextDatum(MC_DATUM);
+  sprite.setFreeFont(&FreeSansBold18pt7b);
+  drawHeavy("NO CONNECTION", CENTER_X, 98, INK);
+  drawBody("Trying again.", CENTER_X, 134, INK_2);
+  sprite.pushSprite(0, 0);
+}
+
+// ── QR ──
+//
+// esp_qrcode ritar via en callback utan användardata, så rutan bor här.
+const int QR_AREA = 138;   // den vita rutans sida
+const int QR_X    = 14;
+const int QR_PAD  = 8;     // tyst zon innanför den vita kanten
+
 void drawQrToSprite(esp_qrcode_handle_t qr) {
   const int modules = esp_qrcode_get_size(qr);
-  const int scale = 140 / modules;
+  const int scale = (QR_AREA - 2 * QR_PAD) / modules;
   const int size = modules * scale;
-  const int x0 = 18;
-  const int y0 = (SCREEN_H - size) / 2;
-  sprite.fillRect(x0 - 6, y0 - 6, size + 12, size + 12, TFT_WHITE);
+  const int box = size + 2 * QR_PAD;
+  const int bx = QR_X + (QR_AREA - box) / 2;
+  const int by = (SCREEN_H - box) / 2;
+  sprite.fillSmoothRoundRect(bx, by, box, box, 10, TFT_WHITE);
   for (int y = 0; y < modules; y++) {
     for (int x = 0; x < modules; x++) {
       if (esp_qrcode_get_module(qr, x, y)) {
-        sprite.fillRect(x0 + x * scale, y0 + y * scale, scale, scale, TFT_BLACK);
+        sprite.fillRect(bx + QR_PAD + x * scale, by + QR_PAD + y * scale, scale, scale, TFT_BLACK);
       }
     }
   }
 }
 
+// Ny tagg: QR-koden till vänster, och koden att skriva in till höger.
 void renderPairing() {
   sprite.fillSprite(BG);
   esp_qrcode_config_t cfg = ESP_QRCODE_CONFIG_DEFAULT();
@@ -707,19 +831,35 @@ void renderPairing() {
   cfg.qrcode_ecc_level = ESP_QRCODE_ECC_LOW;
   esp_qrcode_generate(&cfg, pairUrl[0] ? pairUrl : PAIR_URL_FALLBACK);
 
+  const int x = QR_X + QR_AREA + 16;          // högerspaltens vänsterkant
+  const int colW = SCREEN_W - x - 12;
   sprite.setTextDatum(TL_DATUM);
-  sprite.setTextColor(BLUE, BG);
-  sprite.setFreeFont(&FreeSansBold9pt7b);
-  sprite.drawString("NEW TAG", 175, 30);
-  sprite.setTextColor(blueAt(0.55), BG);
-  sprite.setFreeFont(&FreeSans9pt7b);
-  sprite.drawString("Scan with", 175, 58);
-  sprite.drawString("Pause Pod", 175, 78);
-  sprite.setTextColor(blueAt(0.40), BG);
-  sprite.drawString("or enter:", 175, 108);
-  sprite.setTextColor(BLUE, BG);
+  drawKicker("NEW TAG", x, 16, HUE);
+
+  sprite.setFreeFont(&FreeSansBold18pt7b);
+  if (sprite.textWidth("SCAN TO") + 1 > colW) sprite.setFreeFont(&FreeSansBold12pt7b);
+  drawHeavy("SCAN TO", x, 40, INK);
+  drawHeavy("PAIR", x, 72, INK);
+
+  drawBody("Or type the code:", x, 104, INK_2);
+
+  // Koden i en pill, bokstäverna lite isär så att de går att läsa av.
+  const int pillCy = 145, pillH = 32;
+  drawPill(x + colW / 2, pillCy, colW, pillH, SURF, LINE);
   sprite.setFreeFont(&FreeSansBold12pt7b);
-  sprite.drawString(pairCode, 175, 128);
+  const int track = 3;
+  int len = strlen(pairCode);
+  int total = 0;
+  char ch[2] = {0, 0};
+  for (int i = 0; i < len; i++) { ch[0] = pairCode[i]; total += sprite.textWidth(ch) + (i ? track : 0); }
+  int cx = x + (colW - total) / 2;
+  sprite.setTextDatum(ML_DATUM);
+  sprite.setTextColor(INK);
+  for (int i = 0; i < len; i++) {
+    ch[0] = pairCode[i];
+    sprite.drawString(ch, cx, pillCy);
+    cx += sprite.textWidth(ch) + track;
+  }
   sprite.pushSprite(0, 0);
 }
 
@@ -733,14 +873,12 @@ void renderIdle() {
   switch (tagInfo) {
     case TI_PENDING:
       lastDrawnPairCode[0] = 0;
-      renderTwoLines("HELLO", "Checking...");
+      renderChecking();
       break;
-    case TI_KNOWN: {
+    case TI_KNOWN:
       lastDrawnPairCode[0] = 0;
-      String hi = String("HI, ") + displayName();
-      renderTwoLines(hi.c_str(), "Close the lid to start");
+      renderHello();
       break;
-    }
     case TI_UNKNOWN:
       if (strcmp(lastDrawnPairCode, pairCode) != 0) {
         renderPairing();
@@ -749,13 +887,21 @@ void renderIdle() {
       break;
     case TI_OFFLINE:
       lastDrawnPairCode[0] = 0;
-      renderTwoLines("NO CONNECTION", "Retrying...");
+      renderOffline();
       break;
     default:
       renderLogo();
   }
 }
 
+// Pausen som pågår: märket och dess gloria, inget annat. Locket är stängt.
+void drawActiveMark(float k) {
+  drawHalo(CENTER_X, CENTER_Y, 62, k);
+  drawPauseMark(CENTER_X, CENTER_Y, 64, fadeIn(C_ACCENT, k));
+}
+
+// Startceremonin: grön bock (lådans bekräftelse) → CLOCK ON. → 00:01–00:05
+// → märket tonar in. Klockan går redan under ceremonin.
 void renderCheckedIn() {
   sprite.fillSprite(BG);
   unsigned long t = millis() - phaseStartMs;
@@ -766,102 +912,98 @@ void renderCheckedIn() {
     float fade = 1.0;
     unsigned long left = CER_CHECK_END - t;
     if (left < CHECK_FADE_MS) fade = left / (float)CHECK_FADE_MS;
-    drawArc(CENTER_X, CENTER_Y, RING_R, 6, -90, 270, greenAt(fade));
-    drawCheck(CENTER_X, CENTER_Y, RING_R, 8, draw, greenAt(fade));
+    uint16_t g = fadeIn(C_GREEN, fade);
+    drawRing(CENTER_X, CENTER_Y, RING_R, 6, g);
+    drawCheck(CENTER_X, CENTER_Y, RING_R, 9, draw, g);
   } else if (t < CER_TEXT_END) {
     float u = (t - CER_CHECK_END) / (float)STARTED_TEXT_MS;
     float k = (u < 0.2) ? u / 0.2 : ((u > 0.8) ? (1.0 - u) / 0.2 : 1.0);
-    sprite.setTextColor(blueAt(k), BG);
-    sprite.setFreeFont(&FreeSansBold12pt7b);
-    sprite.drawString("PAUSE STARTED", CENTER_X, CENTER_Y);
-  } else if (t < CER_COUNT_END) {
-    unsigned long ct = t - CER_TEXT_END;
-    int n = ct / 1000 + 1;
-    if (n > COUNT_SECONDS) n = COUNT_SECONDS;
-    float within = (ct % 1000) / 1000.0;
-    float k = (within < 0.15) ? within / 0.15 : 1.0;
-    sprite.setTextColor(blueAt(k), BG);
-    sprite.setFreeFont(&FreeSansBold18pt7b);
-    sprite.drawString(formatDuration(n * 1000UL), CENTER_X, CENTER_Y);
+    sprite.setFreeFont(&FreeSansBold24pt7b);
+    drawHeavy("CLOCK ON.", CENTER_X, CENTER_Y, fadeIn(C_INK, k));
   } else if (t < CER_FADE_END) {
-    float k = 1.0 - (t - CER_COUNT_END) / (float)COUNT_FADE_MS;
-    sprite.setTextColor(blueAt(k), BG);
-    sprite.setFreeFont(&FreeSansBold18pt7b);
-    sprite.drawString(formatDuration(COUNT_SECONDS * 1000UL), CENTER_X, CENTER_Y);
+    unsigned long ct = t - CER_TEXT_END;
+    int n;
+    float k;
+    if (t < CER_COUNT_END) {
+      n = ct / 1000 + 1;
+      if (n > COUNT_SECONDS) n = COUNT_SECONDS;
+      float within = (ct % 1000) / 1000.0;
+      k = (within < 0.15) ? within / 0.15 : 1.0;
+    } else {
+      n = COUNT_SECONDS;
+      k = 1.0 - (t - CER_COUNT_END) / (float)COUNT_FADE_MS;
+    }
+    sprite.setFreeFont(&FreeSansBold24pt7b);
+    drawHeavy(formatDuration(n * 1000UL), CENTER_X, CENTER_Y, fadeIn(C_INK, k));
   } else {
     float k = (t - CER_FADE_END) / (float)LOGO_FADE_MS;
     if (k > 1.0) k = 1.0;
-    for (int i = 8; i >= 1; i--) {
-      uint8_t intensity = (uint8_t)((30 - (i * 3)) * k);
-      uint16_t glow = tft.color565(intensity / 3, intensity, intensity * 1.5);
-      sprite.drawCircle(CENTER_X, CENTER_Y, 30 + i, glow);
-    }
-    drawPauseIcon(CENTER_X, CENTER_Y, ICON_SIZE_PAUSE_LARGE, blueAt(k));
+    drawActiveMark(k);
   }
   sprite.pushSprite(0, 0);
 }
 
+// Appens flöde: två steg, och en mätare av två staplar som säger var man är.
 void renderAwaitingLid() {
   sprite.fillSprite(BG);
-  uint16_t c = blueAt(0.55 + 0.45 * breathProgress(millis() - phaseStartMs));
+  const int segW = 26, segH = 6, segGap = 8;
+  int sx = CENTER_X - segW - segGap / 2;
+  sprite.fillSmoothRoundRect(sx, 22, segW, segH, segH / 2, HUE);
+  sprite.fillSmoothRoundRect(sx + segW + segGap, 22, segW, segH, segH / 2, phonePlaced ? HUE : LINE);
+
   sprite.setTextDatum(MC_DATUM);
-  sprite.setTextColor(c, BG);
-  sprite.setFreeFont(&FreeSansBold12pt7b);
-  if (phonePlaced) {
-    sprite.drawString("CLOSE BOX", CENTER_X, CENTER_Y);
-  } else {
-    sprite.drawString("PLACE PHONE", CENTER_X, CENTER_Y - 13);
-    sprite.drawString("IN BOX",      CENTER_X, CENTER_Y + 13);
-  }
+  sprite.setFreeFont(&FreeSansBold24pt7b);
+  drawHeavy(phonePlaced ? "LID DOWN." : "PHONE IN.", CENTER_X, 82, INK);
+  drawBody(phonePlaced ? "The clock starts then." : "Screen facing down.", CENTER_X, 132, INK_2);
   sprite.pushSprite(0, 0);
 }
 
 void renderActive() {
   sprite.fillSprite(BG);
-  for (int i = 8; i >= 1; i--) {
-    uint8_t intensity = 30 - (i * 3);
-    uint16_t glow = tft.color565(intensity / 3, intensity, intensity * 1.5);
-    sprite.drawCircle(CENTER_X, CENTER_Y, 30 + i, glow);
-  }
-  drawPauseIcon(CENTER_X, CENTER_Y, ICON_SIZE_PAUSE_LARGE, BLUE);
+  drawActiveMark(1.0);
   sprite.pushSprite(0, 0);
 }
 
+// Locket öppet: klockan står, och fristen rinner ur en rad staplar — en per
+// sekund, samma form som märket.
 void renderRespite() {
   sprite.fillSprite(BG);
-  const int R = 46;
   unsigned long since = millis() - respiteStartMs;
   unsigned long left  = (since >= RESPITE_MS) ? 0 : (RESPITE_MS - since);
-  float frac = left / (float)RESPITE_MS;
-  drawProgressRing(CENTER_X, CENTER_Y, R, 5, frac, blueAt(0.65));
+
   sprite.setTextDatum(MC_DATUM);
-  sprite.setTextColor(blueAt(0.45), BG);
-  sprite.setFreeFont(&FreeSansBold18pt7b);
-  sprite.drawString(formatDuration(elapsedMs()), CENTER_X, CENTER_Y - 6);
-  sprite.setTextColor(blueAt(0.30), BG);
-  sprite.setFreeFont(&FreeSans9pt7b);
-  sprite.drawString("ON HOLD", CENTER_X, CENTER_Y + 24);
+  drawKicker("ON HOLD", CENTER_X, 20, HONEY);
+  sprite.setFreeFont(&FreeSansBold24pt7b);
+  drawHeavy(formatDuration(elapsedMs()), CENTER_X, 64, INK);
+
+  const int bars = RESPITE_MS / 1000;
+  const int bw = 5, bh = 18, bgap = 3;
+  int total = bars * bw + (bars - 1) * bgap;
+  int x = (SCREEN_W - total) / 2;
+  float remaining = left / 1000.0;
+  for (int i = 0; i < bars; i++) {
+    float k = remaining - i;                 // 1 = full stapel, 0 = tom
+    uint16_t c = (k >= 1.0) ? HUE : (k <= 0.0 ? LINE : mix(C_LINE, C_HUE, k));
+    sprite.fillSmoothRoundRect(x + i * (bw + bgap), 102, bw, bh, 2, c);
+  }
+  drawBody("Lid down to go on.", CENTER_X, 146, INK_2);
   sprite.pushSprite(0, 0);
 }
 
+// Klar: tiden, i honung och grädde. Rekordet får en honungsfylld pill med
+// marinblå text (designsystemet: mörk text på honung).
 void renderEnded() {
   sprite.fillSprite(BG);
-  for (int i = 8; i >= 1; i--) {
-    uint8_t intensity = 30 - (i * 3);
-    uint16_t glow = tft.color565(intensity / 3, intensity, intensity * 1.5);
-    sprite.drawCircle(CENTER_X, CENTER_Y, 48 + i, glow);
-  }
   sprite.setTextDatum(MC_DATUM);
-  sprite.setTextColor(BLUE_GLOW, BG);
-  sprite.setFreeFont(&FreeSans9pt7b);
-  sprite.drawString("PAUSE DONE", CENTER_X, CENTER_Y - 30);
-  sprite.setTextColor(BLUE, BG);
-  sprite.setFreeFont(&FreeSansBold18pt7b);
-  sprite.drawString(formatDuration(endedDurationMs), CENTER_X, CENTER_Y + 4);
+  drawKicker("PAUSE DONE", CENTER_X, 26, HONEY);
+  sprite.setFreeFont(&FreeSansBold24pt7b);
+  drawHeavy(formatDuration(endedDurationMs), CENTER_X, 76, INK);
   if (endedWasRecord) {
-    sprite.setTextColor(BLUE_GLOW, BG);
-    sprite.setFreeFont(&FreeSans9pt7b);
-    sprite.drawString("LONGEST YET", CENTER_X, CENTER_Y + 42);
+    sprite.setFreeFont(&FreeSansBold9pt7b);
+    int w = sprite.textWidth("LONGEST YET") + 36;
+    drawPill(CENTER_X, 128, w, 30, HONEY, HONEY);
+    sprite.setTextColor(BG);
+    sprite.drawString("LONGEST YET", CENTER_X, 128);
   }
   sprite.pushSprite(0, 0);
 }
@@ -1230,11 +1372,7 @@ void setup() {
 
   tft.init();
   tft.setRotation(1);
-  BLUE      = tft.color565(46, 134, 222);
-  BLUE_GLOW = tft.color565(80, 160, 230);
-  BLUE_DIM  = tft.color565(20, 60, 110);
-  GREEN     = tft.color565(60, 200, 120);
-  BG        = TFT_BLACK;
+  initColors();
   tft.fillScreen(BG);
 
   // 320x170 i 16 bitar = 108 kB. I PSRAM om den finns — internminnet behövs

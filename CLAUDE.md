@@ -1300,7 +1300,10 @@ Ovanpå det ligger `TAB_LIFT` (10), som växer **både** höjden och
 paddningarna och tryckt ihop ikon och etikett; nu står de 44 punkter höga
 som förut, bara högre upp.
 
-Övriga skärmar (`circle-chat`s skrivrad, `circle-invite`s fot) läser
+**Golvet bor i [lib/bottomInset.ts](lib/bottomInset.ts)** (`safeBottom()`),
+och fler skärmar än flikraden läser det: kretsens wrapped (prickarna låg
+under Samsungs tre knappar med en fast `paddingBottom: 44`) och kretsens
+meny. Övriga skärmar (`circle-chat`s skrivrad, `circle-invite`s fot) läser
 fortfarande `insets.bottom` rakt av. Dyker samma rapport upp för dem är det
 det här golvet som ska återanvändas, inte ett nytt tal per skärm.
 
@@ -2140,8 +2143,47 @@ SQL-editorn (samma konvention som RPC-kommentaren högst upp i
     mörkt tittskikt över sidan prövades och föll. Andelen av kretsens tid
     visas inte. Periodvalet står centrerat ovanför ringen, lyft en bit
     (`periodPill`), med datumet strax under sig.
-    Rubriken bär belöningen, veckan och chatten; inbjudan och utgången står i
-    medlemslistan (tryck på kretsens namn). **Totalkortet och *See
+    - **Man bläddrar bakåt med pilarna på var sin sida om datumet.** Kapseln
+      heter därför *Week | Day* och inte *This week | Today*: den är stegets
+      storlek, inte "nu". Idén kom från en testare, och poängen är att se
+      både sina egna och de andras gångna veckor på samma ställe som talen
+      redan står.
+      - **Ett svep över ringen fanns en kort stund och togs bort på
+        begäran:** ett vågrätt drag på en lodrät sida blev för lätt en
+        rullning. Lägg inte tillbaka det.
+      - **Den valda medlemmen följer med bakåt.** Medan en period hämtas
+        står de nuvarande medlemmarna kvar, och den som är vald men inte var
+        med då läggs till med noll — annars föll ringen tillbaka till
+        `EVERYONE` mitt i bläddringen.
+    - **Reglerna är statistikens** (`pause-activity-chart.tsx`): framåt tar
+      stopp i nuet, byte av period eller krets landar i nuet igen, och bakåt
+      tar stopp vid kretsens första dag (`circles.created_at`) — inget annat
+      tak. *Back to this week ›* / *Back to today ›* står under datumet när
+      man är bakåt; raden är alltid renderad och bara osynlig i nuet, så att
+      ringen inte hoppar.
+    - **Pågående period läses ur `get_circle_progress`, en gången ur
+      `get_circle_period`** ([supabase/circles.sql](supabase/circles.sql)),
+      en gång per bläddring och inte i fyrsekunderspollen. Den visar
+      medlemmarna som var med då; den som lämnat står nedtonad, för timmarna
+      ligger kvar i ledgern och brickorna ska gå ihop med summan. En gången
+      period visar ingen *Set your goal* och ingen *N OF M GOALS SET* — de
+      handlar om nu. En vunnen vecka visar sin `GOAL REACHED · WEEK N`.
+    - **Målen som gällde då sparas i `circle_week_goals`**, skriven av
+      `snapshot_circle_week_goals()` från `evaluate_circle_goals` (raden för
+      pågående vecka skrivs om tills veckan vänt). Målet bor annars bara på
+      `profiles` och skrivs över, så **de verkliga målen börjar den dag
+      tabellen kom till.** Veckorna före det fylldes en gång med varje
+      persons *nuvarande* mål (på begäran, oktober 2026) — en uppskattning,
+      för en tom ring med *no goal* lästes som att vännen inte haft något
+      mål. Fyllnaden rör bara veckor före kretsens första sparade vecka och
+      skriver aldrig över en sparad rad, så circles.sql går att köra om. En
+      vecka helt utan rader visar timmarna med en tom ring och *no goals
+      saved*. En gången dag räknas i tittarens tidszon, samma regel som
+      `today_seconds` — den visar bara och låser aldrig upp något.
+    - **Körordning:** kör om circles.sql före appen; utan den svarar
+      `get_circle_period` med fel och en gången period står tom.
+    Rubriken bär bara chatten; belöningen, veckan, medlemmarna och utgången
+    står i kretsens meny (tryck på kretsens namn). **Totalkortet och *See
     everyone* står inte i ringvyn** — summan står i ringen och var och ens tal
     på brickan; bara kortets statusrad (`GOAL REACHED` eller `N OF M GOALS
     SET`) flyttade upp under ringen. Ett befintligt mål ändras därför på Hem
@@ -2153,7 +2195,7 @@ SQL-editorn (samma konvention som RPC-kommentaren högst upp i
     kretsfliken har inte den uppgiften, och att hämta `profiles.is_pausing`
     vore en ny fråga. `false` ger tillbaka streckvyn som den beskrivs nedan.
   - **Potten är sidans huvudsak, i designreferensens ordning:** kapseln
-    *This week / Today* ([components/segmented-pill.tsx](components/segmented-pill.tsx)),
+    *Week / Day* (hette *This week / Today* före bakåtbläddringen) ([components/segmented-pill.tsx](components/segmented-pill.tsx)),
     raden `YOUR CIRCLE` med periodens datum, medlemmarnas streck över hela
     bredden, den valda medlemmen i ord, och summan i ett kort under. Det är **en** uppsättning streck och ett kort —
     pagern och prickarna är borta, och kapseln byter period genom att strecken
@@ -2311,19 +2353,15 @@ SQL-editorn (samma konvention som RPC-kommentaren högst upp i
     står fritt och får luft i stället. Av samma skäl är status och nivå
     versal accenttext, inte kapslar: en pill runt tre tecken är ännu en liten
     rektangel.
-  - **Veckoknappen är bara en ikon**, den mittersta av tre i rubrikraden —
-    belöningen, veckan, chatten (se *Kretsens chatt*).
-    - **Den och sin tvilling i [app/stats.tsx](app/stats.tsx) är nu exakt
-      samma knapp**: 44 × 44, samma tonade botten, samma ram, samma radie,
-      samma `insights`-ikon, ingen text. Två ingångar till samma sorts
-      vecka ska se likadana ut, så ändras måtten eller tonen i den ena
-      måste den andra följa med.
-    - Texten föll bort på båda, och av samma slags skäl. I kretsfliken hade
-      ett kort med rubrik bredvid emblemet blivit två rubriker på samma
-      rad; i statistiken var *See the week that passed* ett brett kort som
-      bara sa vad knappen redan var och sköt ner `RECENT PAUSES` en hel
-      radhöjd. `accessibilityLabel` bär meningen på båda ställena — texten
-      är inte borta, bara osynlig.
+  - **Veckan (kretsens wrapped) är en rad i kretsens meny**, *This week*,
+    med samma `insights`-ikon som förut. Den var en ikonknapp i rubrikraden
+    och flyttade in i menyn bakom namnet på begäran (se medlemslistan
+    nedan).
+    - **Tvillingen i [app/stats.tsx](app/stats.tsx) är kvar som knapp**:
+      44 × 44, `insights`-ikonen, ingen text, `accessibilityLabel` bär
+      meningen. I statistiken var *See the week that passed* ett brett kort
+      som bara sa vad knappen redan var och sköt ner `RECENT PAUSES` en hel
+      radhöjd.
     - **I statistiken sitter den i högra hörnet av `RECENT PAUSES`-raden**,
       inte uppe på bakåtraden: veckan hör ihop med pauserna den
       sammanfattar, och listan under rubriken är just de pauserna. Raden
@@ -2376,24 +2414,36 @@ SQL-editorn (samma konvention som RPC-kommentaren högst upp i
   kretsen. Inget tak, inget nattfönster; båda övervägdes och valdes bort. Bara
   tid och längd, aldrig intentionen. Kommer ur `longest_pause` i
   `get_circle_wrapped()`.
-- **Medlemslistan öppnas genom att trycka på cirkelns namn.** Rubriken *är*
-  knappen — den gamla *View group*-länken under den är borta, och chevronen
-  som satt i länken sitter nu bredvid namnet. Det är hela poängen med den:
-  en rubrik som går att trycka på måste visa att den gör det, annars är den
-  bara en rubrik. Namnet har `numberOfLines={1}` och krymper före chevronen.
-  Listan är enda
+- **Kretsens meny öppnas genom att trycka på cirkelns namn.** Rubriken *är*
+  knappen, med ett `⌄` bredvid: en rubrik som går att trycka på måste visa
+  att den gör det. Namnet har `numberOfLines={1}` och krymper före `⌄`.
+  - **Menyn är ett ark nerifrån** (som att göra-arket och taggkortet) med
+    kretsens namn, inställningsraden, medlemmarna som ansikten, *Reward*
+    (bara när belöningen är på), *This week* och *Leave circle*. Den var
+    medlemslistan och växte till menyn när belöningen och veckan flyttade ut
+    ur rubrikraden på begäran — användare ville ha en renare sida. Rubrikraden
+    bär numera bara chatten (se *Kretsens chatt*).
+  - **Medlemslistan ligger ett steg in, i samma kort** (`menuPage`), med en
+    bakåtknapp. Sidan byts i kortet i stället för att en modal öppnas ovanpå,
+    för två modaler ovanpå varandra fungerar inte på iOS. Rader som öppnar
+    ett annat ark (inställningarna, belöningen) stänger menyn först.
+  - **Pricken på `⌄`** betyder att något bakom menyn väntar på en själv —
+    idag bara en ej lagd röst på belöningen — och raden inne i menyn bär
+    samma prick. Det är den enda prick som får gömmas bakom menyn: allt med
+    en prick som används ofta (chatten) står kvar framme.
+  Medlemslistan är enda
   stället där cirkeln skriver till `friendships` — samma direkta insert som
   `app/add-friend.tsx:116`, ingen RPC. Relationerna hämtas när modalen öppnas
   och inte i `load()`, som kör var fjärde sekund. En väntande förfrågan visas
   som "Pending" utan riktning med flit: den kan gå åt båda hållen, och
   "Requested" hade ljugit när det var de som frågat dig. Att svara på den hör
   hemma i vänner-fliken.
-  - **Utgången, *Leave circle*, bor i medlemslistan** — under raderna, med en
-    linje ovanför och i `danger`. Den satt förr som en ikon bredvid inbjudan
-    i rubrikraden. Att lämna är sällsynt och svårt att ångra och hör hemma
+  - **Utgången, *Leave circle*, bor sist i menyn** — med en linje ovanför
+    och i `danger`. Den satt förr som en ikon bredvid inbjudan i
+    rubrikraden. Att lämna är sällsynt och svårt att ångra och hör hemma
     där medlemskapet syns.
-  - **Inbjudan bor också i medlemslistan**, som en liten rund ikon
-    (`user-plus`, rummets `hue`) i kortets övre högra hörn. Den satt ytterst
+  - **Inbjudan bor i medlemslistan**, som en liten rund ikon (`user-plus`,
+    rummets `hue`) till höger på listans rubrikrad. Den satt ytterst
     i kretsflikens rubrikrad och flyttade när belöningen tog plats där: att
     bjuda in hör till vilka som är med. En tid var den en hel rad,
     *Invite friends*, ovanför utgången; den krymptes till en ikon på
@@ -2583,16 +2633,17 @@ SQL-editorn efter `circles.sql`, samma konvention som resten), vägen dit i
   en skrivrad som följer tangentbordet. Inne i kretsflikens rullning hade
   den slagits med potten och flödet om samma lodräta utrymme, och skrivraden
   hamnat under tangentbordet längst ner i en lång sida.
-- **Ingången står sist av tre i rubrikraden (`headerActions`)** —
-  belöningen, veckan, chatten, i den ordningen på begäran. Inbjudan stod
-  förr ytterst och bor numera i medlemslistan bredvid utgången. Raden bar en
-  gång fyra ikoner (med utgången) och lästes då som en verktygslåda — tre är
-  taket. Knapparna har vandrat: en stapel
-  bredvid nivåmärket, en kolumn bredvid pottens streck, och nu en rad till
-  höger om nivån, under kretsens namn. Samma rad som namnet prövades och
-  flyttades tillbaka: namnet fick för lite plats.
-  - Samma kvadrat, radie och ram som `wrappedBtn` och belöningen, så de tre
-    läser som en familj. Ändras måtten i en av dem måste de andra följa med.
+- **Ingången är den enda knappen kvar i rubrikraden (`headerActions`)**, till
+  höger om nivån under kretsens namn. Raden bar en gång fyra ikoner och
+  sedan tre (belöningen, veckan, chatten); belöningen och veckan flyttade in
+  i kretsens meny bakom namnet på begäran, för att sidan skulle bli renare.
+  Chatten stannade framme för att den används oftast och för att dess prick
+  måste synas — en prick bakom en meny blir en prick på menyn, och då säger
+  den inte längre *vad*. Knapparna har vandrat: en stapel bredvid
+  nivåmärket, en kolumn bredvid pottens streck, och nu en rad till höger om
+  nivån. Samma rad som namnet prövades och flyttades tillbaka: namnet fick
+  för lite plats.
+  - Samma kvadrat, radie och ram som veckoknappen i stats.tsx.
   - Ikonen är en **fylld** bubbla (`comment` med `solid`): den ska hittas
     utan att man letar, och en kontur försvinner bland kretsflikens
     hårfina linjer.
@@ -2662,13 +2713,14 @@ appen kan inte kontrollera att den blir av och försöker inte. Schemat bor i
 efter `circles.sql`), klienten i [lib/circleRewards.ts](lib/circleRewards.ts),
 modalen i [components/circle-reward-sheet.tsx](components/circle-reward-sheet.tsx).
 
-- **En belöning i taget, och den står bakom en knapp, inte på sidan.**
-  Knappen står först i rubrikraden: en stjärna i en lagerkrans
+- **En belöning i taget, och den står bakom en rad i kretsens meny, inte på
+  sidan.** Raden bär en stjärna i en lagerkrans
   ([components/reward-wreath-icon.tsx](components/reward-wreath-icon.tsx),
   svg, eftersom en krans är blad längs en båge och inte går att bygga av
-  kanter). Stjärnan är fylld när kretsen har en belöning. Plottret uppstår
-  när flera saker står framme samtidigt, så ingenting om belöningen står
-  framme.
+  kanter), fylld när kretsen har en belöning, och belöningens text till
+  höger. Kransen stod förr först i rubrikraden och flyttade in i menyn på
+  begäran. Plottret uppstår när flera saker står framme samtidigt, så
+  ingenting om belöningen står framme.
 - **Den är valfri per krets, och av som förval** (`circles.rewards_enabled`,
   ägarens val — se *Kretsens inställningar*). Av: ingen krans i rubriken,
   `propose_circle_reward` tar inte emot förslag, triggern låser ingenting,
@@ -2718,7 +2770,7 @@ modalen i [components/circle-reward-sheet.tsx](components/circle-reward-sheet.ts
 - **Städningen sker i SQL, utan cron** (`settle_circle_rewards`, samma
   linje som `evaluate_circle_goals`), före varje läsning och förslag: den som
   lämnat tar med sig sitt förslag och sin röst.
-- **Pricken på knappen** betyder att man inte lagt sin röst än och att det
+- **Pricken** (på menyns rad och på `⌄` bredvid kretsens namn) betyder att man inte lagt sin röst än och att det
   finns andras förslag att lägga den på. När rösten väl ligger någonstans
   väntar ingenting, hur många förslag som än kommer till. Ingen siffra, och
   den räknas **inte** in i flikbrickan.

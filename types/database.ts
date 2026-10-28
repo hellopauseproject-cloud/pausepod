@@ -274,3 +274,41 @@ export type CircleProgress = {
   /** Dagar i veckan som räknas: 7, eller 5 för en krets som bara räknar vardagar. */
   count_days?: number;
 };
+
+/** Det ringen ritar — gemensamt för pågående period och en gången. */
+export type CirclePotNumbers = Pick<
+  CircleProgress,
+  'members' | 'pot_target_seconds' | 'pot_progress_seconds' | 'goal_reached' | 'achievements_count'
+>;
+
+/** En medlem i en gången period — också någon som lämnat sedan dess. */
+export type CirclePeriodMember = CircleMemberProgress & {
+  username: string;
+  avatar_url: string | null;
+  /** false = har lämnat kretsen; timmarna står kvar och visas nedtonade. */
+  is_member: boolean;
+};
+
+/**
+ * En gången vecka eller dag — `get_circle_period` i supabase/circles.sql.
+ * Samma form som `CircleProgress` där de överlappar. För en dag står dagens
+ * sekunder i både `progress_seconds` och `today_seconds`.
+ */
+export type CirclePeriod = {
+  circle_id: string;
+  mode: 'week' | 'day';
+  week_start: string;
+  period_start: string;
+  members: CirclePeriodMember[];
+  member_count: number;
+  goals_set_count: number;
+  /** false för veckor innan målen började sparas — då visas timmarna utan ring. */
+  goals_known: boolean;
+  met_count: number;
+  pot_target_seconds: number;
+  pot_progress_seconds: number;
+  goal_reached: boolean;
+  /** Vunna veckor till och med den här — "WEEK N". */
+  achievements_count: number;
+  circle_started: string;
+};

@@ -226,6 +226,33 @@ create table if not exists circle_goal_achievements (
 );
 create index if not exists circle_goal_achievements_circle_idx on circle_goal_achievements(circle_id, week_start desc);
 
+-- Varje medlems mål för en vecka, så att en gången vecka kan visas mot målen
+-- som gällde DÅ. Målet bor på `profiles` och skrivs över när det ändras —
+-- utan den här tabellen fanns inget sätt att veta vad någon siktade på för
+-- en månad sedan, och ringen i en gammal vecka hade mätts mot dagens mål.
+--
+-- Skrivs av `snapshot_circle_week_goals()` från `evaluate_circle_goals`, alltså
+-- vid varje paus, måländring och öppning av fliken. Raden för pågående vecka
+-- skrivs om så länge veckan pågår; när veckan vänt står det sista värdet kvar.
+-- En medlem som lämnar mitt i veckan behåller sin rad.
+--
+-- **De verkliga målen börjar den dag den här tabellen kom till.** Veckorna
+-- före det fylls en gång med nuvarande mål — se *Bakåtfyllnaden* vid
+-- snapshot_circle_week_goals.
+--
+-- Inga grants, som ledgern: allt som visas kommer ur get_circle_period().
+create table if not exists circle_week_goals (
+  circle_id uuid not null references circles(id) on delete cascade,
+  user_id uuid not null references profiles(id) on delete cascade,
+  week_start date not null,
+  daily_target_seconds int,
+  -- 5 eller 7 — veckans ribba är dagsmålet gånger det här talet, och
+  -- räknefönstret kan ändras mellan veckor.
+  count_days int not null default 7,
+  updated_at timestamptz not null default now(),
+  primary key (circle_id, week_start, user_id)
+);
+
 create table if not exists circle_level_ups (
   id uuid primary key default gen_random_uuid(),
   circle_id uuid not null references circles(id) on delete cascade,
@@ -302,6 +329,7 @@ alter table circle_members enable row level security;
 alter table circle_invites enable row level security;
 alter table circle_pause_ledger enable row level security;
 alter table circle_goal_achievements enable row level security;
+alter table circle_week_goals enable row level security;
 alter table circle_level_ups enable row level security;
 alter table circle_wrapped_hearts enable row level security;
 alter table circle_activity enable row level security;
@@ -825,6 +853,9 @@ begin
   perform promote_circle_settings(p_circle_id);
   v_days := circle_count_days(p_circle_id);
 
+  -- Veckans mål sparas för historiken (se circle_week_goals).
+  perform snapshot_circle_week_goals(p_circle_id, v_week, v_days);
+
   -- Ingen promotering längre: målet ändras direkt när någon ändrar det, så
   -- det finns inget parkerat att vänta in vid veckoskiftet.
   -- `pending_target_seconds` och `target_week` står kvar i tabellen men
@@ -893,6 +924,63 @@ $$;
 -- Inte något klienten ska kunna ropa på direkt — den anropas från RPC:erna
 -- nedan, och de har redan kollat medlemskap.
 revoke execute on function evaluate_circle_goals(uuid) from public, anon, authenticated;
+
+-- Skriver varje nuvarande medlems mål för veckan till circle_week_goals.
+-- `where ... is distinct from` gör att en oförändrad rad inte skrivs om:
+-- evaluate körs var fjärde sekund medan någon har fliken öppen.
+create or replace function snapshot_circle_week_goals(p_circle_id uuid, p_week date, p_days int)
+returns void
+language sql
+security definer
+set search_path = public
+as $$
+  insert into circle_week_goals (circle_id, user_id, week_start, daily_target_seconds, count_days)
+  select p_circle_id, m.user_id, p_week, p.daily_target_seconds, p_days
+    from circle_members m
+    join profiles p on p.id = m.user_id
+   where m.circle_id = p_circle_id
+  on conflict (circle_id, week_start, user_id) do update
+    set daily_target_seconds = excluded.daily_target_seconds,
+        count_days = excluded.count_days,
+        updated_at = now()
+    where circle_week_goals.daily_target_seconds is distinct from excluded.daily_target_seconds
+       or circle_week_goals.count_days is distinct from excluded.count_days;
+$$;
+
+revoke execute on function snapshot_circle_week_goals(uuid, date, int) from public, anon, authenticated;
+
+-- ── Bakåtfyllnaden ──
+-- Veckorna innan circle_week_goals fanns fylls EN gång med varje persons
+-- NUVARANDE mål (på begäran, oktober 2026). Det är en uppskattning: den som
+-- ändrat sitt mål mäts mot dagens tal i gamla veckor. Alternativet var en tom
+-- ring med "no goal" för all historik, vilket lästes som att vännen inte haft
+-- något mål.
+--
+-- Bara veckor FÖRE kretsens första sparade vecka fylls, och `do nothing` rör
+-- aldrig en rad som redan finns — så filen går att köra om utan att
+-- uppskattningen någonsin skriver över det som sparats på riktigt. Från och
+-- med första sparade veckan är målen de verkliga.
+--
+-- Personerna är de som var med då (nuvarande medlemmar som gått med före
+-- veckans slut) plus de som har timmar i veckan, också om de lämnat sedan.
+insert into circle_week_goals (circle_id, user_id, week_start, daily_target_seconds, count_days)
+select c.id, p.user_id, w.week_start::date, pr.daily_target_seconds, circle_count_days(c.id)
+  from circles c
+  cross join lateral generate_series(
+    circle_week_start(c.created_at)::timestamp,
+    coalesce((select min(g.week_start) from circle_week_goals g where g.circle_id = c.id),
+             circle_week_start())::timestamp - interval '7 days',
+    interval '7 days'
+  ) as w(week_start)
+  cross join lateral (
+    select m.user_id from circle_members m
+     where m.circle_id = c.id and m.joined_at < w.week_start + interval '7 days'
+    union
+    select l.user_id from circle_pause_ledger l
+     where l.circle_id = c.id and l.week_start = w.week_start::date
+  ) p
+  join profiles pr on pr.id = p.user_id
+on conflict (circle_id, week_start, user_id) do nothing;
 
 create or replace function leave_circle(p_circle_id uuid default null)
 returns void
@@ -1224,6 +1312,145 @@ begin
     'level_start_seconds', circle_level_start_seconds(v_level),
     'level_next_seconds', circle_level_start_seconds(v_level + 1),
     'count_days', v_days
+  );
+end;
+$$;
+
+-- ── En gången vecka eller dag ───────────────────────────────────────────────
+-- Det kretsfliken visar när man sveper bakåt i ringen. Pågående period läses
+-- fortfarande ur get_circle_progress (den utvärderar veckan, det här gör det
+-- inte); den här läser bara det som redan hänt.
+--
+-- `p_mode` är 'week' eller 'day'. `p_date` är veckans måndag (vecka) eller
+-- det lokala datumet (dag); dagen avgränsas med klientens tidszon, samma
+-- regel som `today_seconds` i get_circle_progress — en kretsdag visar bara,
+-- den låser aldrig upp något.
+--
+-- Svaret har samma form som get_circle_progress där de två överlappar, så
+-- att klienten kan rita det med samma kod. Skillnaderna:
+--   - Medlemmarna är de som var med DÅ: nuvarande medlemmar som gått med
+--     före periodens slut, plus de som har en målrad eller timmar i perioden.
+--     `is_member = false` är någon som lämnat — timmarna står kvar i ledgern
+--     och måste visas, annars går brickorna inte ihop med summan.
+--   - Målen kommer ur circle_week_goals. Saknas raden (veckor före tabellen)
+--     är målet null och `goals_known` false — klienten visar då timmarna
+--     utan ring.
+--   - `circle_started` är kretsens första lokala dag, så att klienten vet var
+--     bakåt tar slut.
+create or replace function get_circle_period(
+  p_circle_id uuid, p_mode text, p_date date, p_tz_offset_minutes int default 0
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+stable
+as $$
+declare
+  v_circle_id uuid;
+  v_is_day boolean := p_mode = 'day';
+  v_week date;
+  v_start timestamptz;
+  v_end timestamptz;
+  v_members jsonb;
+  v_pot bigint;
+  v_progress bigint;
+  v_member_count int;
+  v_goals_set int;
+  v_met int;
+  v_reached boolean;
+  v_week_no int;
+  v_created timestamptz;
+begin
+  v_circle_id := resolve_my_circle(p_circle_id);
+  if v_circle_id is null then
+    return null;
+  end if;
+  select created_at into v_created from circles where id = v_circle_id;
+
+  if v_is_day then
+    -- Lokal midnatt i UTC: datumet 00:00 plus klientens avvikelse
+    -- (getTimezoneOffset är positiv väster om Greenwich).
+    v_start := (p_date::timestamp at time zone 'utc') + make_interval(mins => p_tz_offset_minutes);
+    v_end := v_start + interval '1 day';
+    v_week := circle_week_start(v_start);
+  else
+    v_week := date_trunc('week', p_date::timestamp)::date;
+    v_start := v_week::timestamp at time zone 'utc';
+    v_end := v_start + interval '7 days';
+  end if;
+
+  with people as (
+    select m.user_id from circle_members m
+     where m.circle_id = v_circle_id and m.joined_at < v_end
+    union
+    select g.user_id from circle_week_goals g
+     where g.circle_id = v_circle_id and g.week_start = v_week
+    union
+    select l.user_id from circle_pause_ledger l
+     where l.circle_id = v_circle_id
+       and (case when v_is_day then l.occurred_at >= v_start and l.occurred_at < v_end
+                 else l.week_start = v_week end)
+  ),
+  t as (
+    select p.user_id, pr.username, pr.avatar_url,
+           exists (select 1 from circle_members m where m.circle_id = v_circle_id and m.user_id = p.user_id) as is_member,
+           (select m.joined_at from circle_members m where m.circle_id = v_circle_id and m.user_id = p.user_id) as joined_at,
+           g.daily_target_seconds,
+           case when g.daily_target_seconds is null then null
+                when v_is_day then g.daily_target_seconds
+                else g.daily_target_seconds * g.count_days end as target,
+           coalesce((
+             select sum(l.seconds) from circle_pause_ledger l
+              where l.circle_id = v_circle_id and l.user_id = p.user_id
+                and (case when v_is_day then l.occurred_at >= v_start and l.occurred_at < v_end
+                          else l.week_start = v_week end)
+           ), 0) as seconds
+      from people p
+      join profiles pr on pr.id = p.user_id
+      left join circle_week_goals g
+        on g.circle_id = v_circle_id and g.week_start = v_week and g.user_id = p.user_id
+  )
+  select
+    coalesce(jsonb_agg(jsonb_build_object(
+      'user_id', t.user_id,
+      'username', t.username,
+      'avatar_url', t.avatar_url,
+      'is_member', t.is_member,
+      'daily_target_seconds', t.daily_target_seconds,
+      'target_seconds', t.target,
+      'progress_seconds', t.seconds,
+      'today_seconds', t.seconds,
+      'met', t.target is not null and t.seconds >= t.target
+    ) order by t.is_member desc, t.joined_at nulls last, t.username), '[]'::jsonb),
+    count(*),
+    count(t.target),
+    count(*) filter (where t.target is not null and t.seconds >= t.target),
+    coalesce(sum(t.target), 0),
+    coalesce(sum(t.seconds), 0)
+    into v_members, v_member_count, v_goals_set, v_met, v_pot, v_progress
+  from t;
+
+  select exists (select 1 from circle_goal_achievements where circle_id = v_circle_id and week_start = v_week),
+         (select count(*) from circle_goal_achievements where circle_id = v_circle_id and week_start <= v_week)
+    into v_reached, v_week_no;
+
+  return jsonb_build_object(
+    'circle_id', v_circle_id,
+    'mode', case when v_is_day then 'day' else 'week' end,
+    'week_start', v_week,
+    'period_start', v_start,
+    'members', v_members,
+    'member_count', v_member_count,
+    'goals_set_count', v_goals_set,
+    'goals_known', v_member_count > 0 and v_goals_set = v_member_count,
+    'met_count', v_met,
+    'pot_target_seconds', v_pot,
+    'pot_progress_seconds', v_progress,
+    -- Bara veckan har en bedrift; en dag låser aldrig upp något.
+    'goal_reached', not v_is_day and v_reached,
+    'achievements_count', v_week_no,
+    'circle_started', v_created
   );
 end;
 $$;

@@ -11,6 +11,7 @@ import { usePalette } from '../contexts/ThemeContext';
 import { useAuth } from '../contexts/AuthContext';
 import { formatDuration, formatWeekRange } from '../lib/circles';
 import { track } from '../lib/analytics';
+import { safeBottom } from '../lib/bottomInset';
 import { supabase } from '../lib/supabase';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
@@ -379,7 +380,9 @@ export default function CircleWrappedScreen() {
         renderItem={({ item }) => <View style={{ width: SCREEN_WIDTH }}>{item.render()}</View>}
       />
 
-      <View style={styles.footer}>
+      {/* Prickarna står ovanför systemets knappar: insetet med Android-golvet
+          plus luft. Ett fast tal (44) lade dem under Samsungs tre knappar. */}
+      <View style={[styles.footer, { paddingBottom: safeBottom(insets.bottom) + 24 }]}>
         <Dots count={pages.length} activeIndex={activeIndex} />
       </View>
     </Animated.View>
@@ -420,7 +423,7 @@ const makeStyles = (Palette: AppPalette) => StyleSheet.create({
   heartBtn: { paddingVertical: 12 },
   heartFaces: { flexDirection: 'row', justifyContent: 'center', marginTop: 4 },
 
-  footer: { paddingBottom: 44, alignItems: 'center' },
+  footer: { alignItems: 'center' },
   dotsRow: { flexDirection: 'row', gap: 7 },
   dot: { width: 7, height: 7, borderRadius: 4, backgroundColor: Palette.ink20 },
   dotActive: { backgroundColor: Palette.textPrimary },

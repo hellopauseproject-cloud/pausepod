@@ -2,7 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { track } from './analytics';
 import { enableDailyReminder } from './notifications';
 import { supabase } from './supabase';
-import type { CircleActivity, CircleActivityType, CircleProgress, DailyGoalProgress } from '../types/database';
+import type { CircleActivity, CircleActivityType, CirclePeriod, CircleProgress, DailyGoalProgress } from '../types/database';
 
 // Samma verb-fraser som CATEGORY_VERB i app/support-story-create.tsx, så
 // aktivitetsflödet låter likadant som resten av appen ("took a pause to study").
@@ -225,6 +225,8 @@ export type MyCircle = {
   /** Läsmärket i just den kretsens chatt; null = aldrig öppnad. */
   chat_read_at: string | null;
   settings: CircleSettings;
+  /** När kretsen skapades — där bakåtbläddringen i ringen tar slut. */
+  created_at: string | null;
 };
 
 // ── Kretsens inställningar ────────────────────────────────────────────────
@@ -261,7 +263,7 @@ export function hasCountWindow(w: CountWindow): boolean {
 }
 
 const CIRCLE_COLUMNS =
-  'name, rewards_enabled, count_from, count_to, count_workdays, ' +
+  'name, created_at, rewards_enabled, count_from, count_to, count_workdays, ' +
   'pending_count_week, pending_count_from, pending_count_to, pending_count_workdays';
 
 function settingsFromRow(c: any): CircleSettings {
@@ -323,7 +325,7 @@ export async function getMyCircles(userId: string): Promise<MyCircle[]> {
     console.log('[circles] getMyCircles: settings columns missing, run circles.sql:', error.message);
     const retry = await supabase
       .from('circle_members')
-      .select('circle_id, role, joined_at, chat_read_at, circle:circles!circle_id(name)')
+      .select('circle_id, role, joined_at, chat_read_at, circle:circles!circle_id(name, created_at)')
       .eq('user_id', userId)
       .order('joined_at', { ascending: true });
     data = retry.data as any;
@@ -345,6 +347,7 @@ export async function getMyCircles(userId: string): Promise<MyCircle[]> {
     joined_at: r.joined_at,
     chat_read_at: r.chat_read_at ?? null,
     settings: settingsFromRow(r.circle),
+    created_at: r.circle?.created_at ?? null,
   }));
 }
 
@@ -450,6 +453,27 @@ export async function getCircleProgress(circleId: string): Promise<CircleProgres
     return null;
   }
   return (data as CircleProgress) ?? null;
+}
+
+/**
+ * En gången vecka (`date` = veckans måndag) eller dag (`date` = det lokala
+ * datumet), för bakåtbläddringen i kretsens ring. Pågående period läses
+ * fortfarande med `getCircleProgress`.
+ */
+export async function getCirclePeriod(
+  circleId: string, mode: 'week' | 'day', date: string,
+): Promise<CirclePeriod | null> {
+  const { data, error } = await supabase.rpc('get_circle_period', {
+    p_circle_id: circleId,
+    p_mode: mode,
+    p_date: date,
+    p_tz_offset_minutes: new Date().getTimezoneOffset(),
+  });
+  if (error) {
+    console.log('[circles] getCirclePeriod error:', error.message);
+    return null;
+  }
+  return (data as CirclePeriod) ?? null;
 }
 
 /**

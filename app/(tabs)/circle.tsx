@@ -20,6 +20,7 @@ import { RoomProvider, usePalette, useTheme } from '../../contexts/ThemeContext'
 import { roomShell, ScreenBackground } from '../../components/screen-background';
 import { CircleTodoNotes, TodoSheet } from '../../components/todo-sheet';
 import { useAuth } from '../../contexts/AuthContext';
+import { safeBottom } from '../../lib/bottomInset';
 import { track } from '../../lib/analytics';
 import { countUnreadCircleMessages } from '../../lib/circleChat';
 import { awaitsMyVote, CircleReward, getCircleReward } from '../../lib/circleRewards';
@@ -28,7 +29,7 @@ import {
 } from '../../lib/circleLevels';
 import {
   CIRCLE_MAX_PER_USER, CircleSettings, formatActivitySegments, formatCountWindow, formatDuration,
-  formatWeekRange, getCircleProgress,
+  formatWeekRange, getCirclePeriod, getCircleProgress,
   getMyCircles, getSelectedCircleId, GOAL_OPTIONS, MyCircle, nearestGoalIndex, setDailyGoal,
   setSelectedCircleId, takeRequestedCircleSelection,
 } from '../../lib/circles';
@@ -36,7 +37,7 @@ import { applyPendingDailyGoal, getPendingCircleWelcome, setPendingCircleWelcome
 import { enablePushNotifications } from '../../lib/notifications';
 import { supabase } from '../../lib/supabase';
 import { getCircleTodos, Todo } from '../../lib/todos';
-import type { CircleMemberProgress, CircleProgress } from '../../types/database';
+import type { CircleMemberProgress, CirclePeriod, CirclePotNumbers, CircleProgress } from '../../types/database';
 
 const MAX_MEMBERS = 10;
 // Flödet hämtas 50 rader djupt men visas tio i taget. Tio räcker för att
@@ -166,11 +167,16 @@ function CircleSwitcher({ circles, selectedId, adding, unread, canAdd, invites, 
 }
 
 /**
- * Rubriken: den valda kretsens namn. Ett tryck öppnar medlemslistan, och
- * chevronen visar att rubriken går att trycka på. Utan `onPress` (medan man
- * lägger till en krets) är den bara en rubrik.
+ * Rubriken: den valda kretsens namn. Ett tryck öppnar kretsens meny
+ * (medlemmar, belöningen, veckan, utgången), och `⌄` visar att den går att
+ * trycka på. Utan `onPress` (medan man lägger till en krets) är den bara en
+ * rubrik.
+ *
+ * Pricken betyder att något bakom menyn väntar på en själv — idag bara att
+ * man inte röstat på belöningen. Raden inne i menyn säger var. Chatten har
+ * sin egen knapp och sin egen prick och räknas inte hit.
  */
-function CircleTitle({ title, onPress }: { title: string; onPress?: () => void }) {
+function CircleTitle({ title, onPress, dot }: { title: string; onPress?: () => void; dot?: boolean }) {
   const Palette = usePalette();
   const styles = useMemo(() => makeStyles(Palette), [Palette]);
   if (!onPress) return <Text style={styles.title} numberOfLines={1}>{title}</Text>;
@@ -180,10 +186,11 @@ function CircleTitle({ title, onPress }: { title: string; onPress?: () => void }
       onPress={onPress}
       activeOpacity={0.6}
       accessibilityRole="button"
-      accessibilityLabel={`${title}. See members.`}
+      accessibilityLabel={dot ? `${title}. Open circle menu. Something is waiting.` : `${title}. Open circle menu.`}
     >
       <Text style={styles.title} numberOfLines={1}>{title}</Text>
-      <FontAwesome5 name="chevron-right" size={14} color={Palette.hue} />
+      <FontAwesome5 name="chevron-down" size={14} color={Palette.hue} />
+      {dot && <View style={styles.titleDot} />}
     </TouchableOpacity>
   );
 }
@@ -276,13 +283,50 @@ function tileTime(seconds: number): string {
 // Pottens kapsel — det enda periodvalet på sidan. Heron (den egna veckan i
 // två streck) är borttagen: man är själv det första strecket i potten, valt
 // som förval, och raden under strecken säger ens siffror.
+//
+// Kapseln är stegets storlek och inte "nu": *Week* och *Day*, inte *This
+// week* och *Today*. Vilken vecka eller dag som visas står på datumraden, och
+// man bläddrar bakåt med pilarna eller genom att svepa över ringen.
 const POT_PILL: [{ key: PotMode; label: string }, { key: PotMode; label: string }] = [
-  { key: 'week', label: 'This week' }, { key: 'day', label: 'Today' },
+  { key: 'week', label: 'Week' }, { key: 'day', label: 'Day' },
 ];
 const PILL_W_POT = 220;
 
+// ── Bakåtbläddringen ──
+// `periodOffset` är 0 för pågående period och negativ bakåt (−1 = förra
+// veckan eller i går). Framåt tar stopp vid nu, bakåt vid kretsens första dag
+// — samma regler som diagrammet i statistiken.
+const DAY_MS = 86400000;
+
+/** Veckans måndag `offset` veckor från `weekStart` ('YYYY-MM-DD', UTC). */
+function shiftWeek(weekStart: string, offset: number): string {
+  const d = new Date(`${weekStart}T00:00:00Z`);
+  return new Date(d.getTime() + offset * 7 * DAY_MS).toISOString().slice(0, 10);
+}
+
+/** Lokal midnatt `offset` dagar från i dag. */
+function localDay(offset: number): Date {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + offset);
+  return d;
+}
+
+/** Ett lokalt datum som 'YYYY-MM-DD' — vad get_circle_period vill ha. */
+function isoLocal(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** En gången dag på datumraden: `SUN 12 OCT`. I dag står som förut (`formatToday`). */
+function formatPastDay(d: Date): string {
+  const days = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+  const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+  return `${days[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]}`;
+}
+
 /** Pottens tal för en period. Dagens räknas här, se `PotPanel`. */
-function potTotals(progress: CircleProgress | null, isDay: boolean) {
+function potTotals(progress: CirclePotNumbers | null, isDay: boolean) {
   const members = progress?.members ?? [];
   return {
     progress: isDay ? members.reduce((a, m) => a + m.today_seconds, 0) : (progress?.pot_progress_seconds ?? 0),
@@ -573,9 +617,10 @@ const MemberRingTile = memo(function MemberRingTile({
  * medlem man tryckt på — se `CircleRings`.
  */
 function HeroRing({
-  mode, value, target, sub, met, label,
+  replayKey, value, target, sub, met, label,
 }: {
-  mode: PotMode;
+  /** Ändras den fylls ringen om från tomt — vid byte av period och vid bläddring. */
+  replayKey: string;
   value: number;
   target: number;
   sub: string;
@@ -592,7 +637,7 @@ function HeroRing({
       stroke={HERO_STROKE}
       color={Palette.hue}
       trackColor={Palette.hueTrack}
-      replayKey={mode}
+      replayKey={replayKey}
       glow
     >
       <View style={styles.heroCenter}>
@@ -621,15 +666,22 @@ function HeroRing({
  * (ansiktet, namnet, tiden och målet, och bågen glider till hens andel av
  * sitt eget mål) och tonar de andra brickorna bak. Ett tryck till på samma
  * medlem, eller på ringen, går tillbaka till `EVERYONE`.
+ *
+ * **En gången period ritas med samma komponent** (`past`). Då visas ingen
+ * uppmaning att sätta ett mål och ingen statusrad om satta mål — de handlar
+ * om nu. Den som lämnat sedan dess står nedtonad (`formerIds`), för timmarna
+ * finns kvar i summan. Veckor innan målen började sparas (`goalsKnown`
+ * false) visar timmarna med en tom ring.
  */
 function CircleRings({
   mode, width, progress, members, byUser, meId, selectedId, onSelect, onOpenGoal, statusLine,
+  replayKey, past = false, formerIds, goalsKnown = true,
 }: {
   /** `N OF M GOALS SET` när målen inte är satta — samma rad totalkortet bar. */
   statusLine: string;
   mode: PotMode;
   width: number;
-  progress: CircleProgress | null;
+  progress: CirclePotNumbers | null;
   members: MemberRow[];
   byUser: Map<string, CircleMemberProgress>;
   meId: string;
@@ -638,11 +690,20 @@ function CircleRings({
   /** Ett tryck på en bricka; samma id igen (eller `null`) går tillbaka. */
   onSelect: (id: string | null) => void;
   onOpenGoal: () => void;
+  /** Byts den fylls ringarna om från tomt (period och bläddring). */
+  replayKey: string;
+  past?: boolean;
+  formerIds?: Set<string>;
+  goalsKnown?: boolean;
 }) {
   const Palette = usePalette();
   const styles = useMemo(() => makeStyles(Palette), [Palette]);
   const isDay = mode === 'day';
-  const { progress: total, target: totalTarget } = potTotals(progress, isDay);
+  const totals = potTotals(progress, isDay);
+  const total = totals.progress;
+  // Utan sparade mål finns ingen ribba att mäta mot — hellre en tom ring än
+  // en som fylls mot halva kretsens mål.
+  const totalTarget = goalsKnown ? totals.target : 0;
 
   // Man själv först, resten i kretsens ordning — aldrig efter tal.
   const ordered = useMemo(
@@ -651,7 +712,8 @@ function CircleRings({
   );
   const tileW = Math.floor(width / TILES_PER_ROW);
   const myGoal = byUser.get(meId)?.daily_target_seconds ?? 0;
-  const period = isDay ? 'today' : 'this week';
+  const period = past ? (isDay ? 'that day' : 'that week') : (isDay ? 'today' : 'this week');
+  const noGoal = past ? 'no goal' : 'no goal yet';
 
   const person = selectedId ? members.find(m => m.id === selectedId) ?? null : null;
   const pv = person ? memberValue(byUser, person.id, isDay) : null;
@@ -667,15 +729,15 @@ function CircleRings({
           accessibilityRole={person ? 'button' : undefined}
           accessibilityHint={person ? 'Shows everyone again.' : undefined}
           accessibilityLabel={person
-            ? `${personName}, ${dur(pv!.value)}${pv!.target ? ` of ${dur(pv!.target)} goal` : ', no goal yet'} ${period}`
+            ? `${personName}, ${dur(pv!.value)}${pv!.target ? ` of ${dur(pv!.target)} goal` : `, ${noGoal}`} ${period}`
             : `Everyone, ${dur(total)} of ${dur(totalTarget)} together ${period}`}
         >
           {person && pv ? (
             <HeroRing
-              mode={mode}
+              replayKey={replayKey}
               value={pv.value}
               target={pv.target}
-              sub={pv.target ? `of ${dur(pv.target)}` : 'no goal yet'}
+              sub={pv.target ? `of ${dur(pv.target)}` : noGoal}
               met={pv.target > 0 && pv.value >= pv.target}
               label={
                 <>
@@ -686,10 +748,10 @@ function CircleRings({
             />
           ) : (
             <HeroRing
-              mode={mode}
+              replayKey={replayKey}
               value={total}
               target={totalTarget}
-              sub={`of ${dur(totalTarget)} together`}
+              sub={totalTarget > 0 ? `of ${dur(totalTarget)} together` : (past ? 'together · no goals saved' : 'together')}
               met={false}
               label={<Text style={styles.heroCircleLabel}>EVERYONE</Text>}
             />
@@ -709,7 +771,7 @@ function CircleRings({
             GOAL REACHED · {progress.achievements_count === 1 ? 'YOUR FIRST WEEK' : `WEEK ${progress.achievements_count}`}
           </Text>
         </View>
-      ) : statusLine ? (
+      ) : statusLine && !past ? (
         <View style={styles.heroStatus}>
           <Text style={styles.heroStatusText}>{statusLine}</Text>
         </View>
@@ -731,12 +793,12 @@ function CircleRings({
               time={tileTime(value)}
               fraction={target ? value / target : 0}
               selected={m.id === selectedId}
-              dimmed={!!selectedId && m.id !== selectedId}
+              dimmed={(!!selectedId && m.id !== selectedId) || !!formerIds?.has(m.id)}
               width={tileW}
               a11yLabel={target
                 ? `${name}, ${dur(value)} of ${dur(target)} goal`
-                : `${name}, ${dur(value)}, no goal yet`}
-              replayKey={mode}
+                : `${name}, ${dur(value)}, ${noGoal}`}
+              replayKey={replayKey}
               onPress={onSelect}
             />
           );
@@ -745,7 +807,7 @@ function CircleRings({
 
       {/* Uppmaningen när det egna målet saknas står kvar — utan mål kan
           kretsens vecka inte låsas upp, se `PotReadout`. */}
-      {!myGoal && (
+      {!myGoal && !past && (
         <TouchableOpacity
           onPress={onOpenGoal}
           activeOpacity={0.6}
@@ -952,7 +1014,7 @@ function CircleScreen() {
   const [adding, setAdding] = useState(false);
   // Olästa per krets, för pricken på kretsraden.
   const [unreadByCircle, setUnreadByCircle] = useState<Record<string, number>>({});
-  const [circle, setCircle] = useState<{ id: string; name: string; settings: CircleSettings } | null>(null);
+  const [circle, setCircle] = useState<{ id: string; name: string; settings: CircleSettings; created_at: string | null } | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [members, setMembers] = useState<MemberRow[]>([]);
   // Rollen bor på medlemsraden och följer med i load(); ägarskapet kan
@@ -994,6 +1056,13 @@ function CircleScreen() {
   const [showAllActivity, setShowAllActivity] = useState(false);
   const [showLadderModal, setShowLadderModal] = useState(false);
   const [potMode, setPotMode] = useState<PotMode>('week');
+  // Bakåtbläddringen i ringen: 0 = pågående period, −1 = förra veckan eller
+  // i går. Byte av period eller krets landar alltid i nuet igen, som
+  // diagrammet i statistiken.
+  const [periodOffset, setPeriodOffset] = useState(0);
+  const [pastPeriod, setPastPeriod] = useState<{ key: string; data: CirclePeriod | null } | null>(null);
+  const changePotMode = (m: PotMode) => { setPotMode(m); setPeriodOffset(0); setPastPeriod(null); };
+  useEffect(() => { setPeriodOffset(0); setPastPeriod(null); }, [selectedCircle]);
   // Strecket som är valt i potten. Står kvar när perioden byts, så att man
   // tittar på samma person i veckan och i dagen. Null = en själv.
   const [selectedMemberId, setSelectedMemberId] = useState<string | null>(null);
@@ -1001,6 +1070,10 @@ function CircleScreen() {
   // Vänskapsläget hämtas när medlemslistan öppnas, inte i load() — den kör
   // var fjärde sekund och relationerna ändras inte i den takten.
   const [showMembersModal, setShowMembersModal] = useState(false);
+  // Menyn är ett kort med två sidor: menyn själv och medlemslistan. Sidan
+  // byts inne i samma kort i stället för att en modal öppnas ovanpå — två
+  // modaler ovanpå varandra fungerar inte på iOS.
+  const [menuPage, setMenuPage] = useState<'menu' | 'members'>('menu');
   const [friendStatus, setFriendStatus] = useState<Record<string, 'accepted' | 'pending'>>({});
   const [addingFriendId, setAddingFriendId] = useState<string | null>(null);
   const [removingMemberId, setRemovingMemberId] = useState<string | null>(null);
@@ -1111,7 +1184,7 @@ function CircleScreen() {
     const unreadMap: Record<string, number> = {};
     mine.forEach((c, i) => { unreadMap[c.id] = unreadCounts[i]; });
     setUnreadByCircle(unreadMap);
-    setCircle({ id: active.id, name: active.name, settings: active.settings });
+    setCircle({ id: active.id, name: active.name, settings: active.settings, created_at: active.created_at });
     setUnreadChat(unreadMap[circleId] ?? 0);
     setReward(rewardRow);
     setProgress(progressRow);
@@ -1156,6 +1229,55 @@ function CircleScreen() {
   }, [user]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Vilken gången period som ska visas, eller null för nu. Veckan räknas från
+  // pågående veckas måndag (serverns), dagen från klientens egen midnatt.
+  const periodRequest = useMemo(() => {
+    if (periodOffset >= 0 || !circle) return null;
+    if (potMode === 'week') {
+      if (!progress?.week_start) return null;
+      const date = shiftWeek(progress.week_start, periodOffset);
+      return { mode: 'week' as const, date, key: `${circle.id}:week:${date}` };
+    }
+    const date = isoLocal(localDay(periodOffset));
+    return { mode: 'day' as const, date, key: `${circle.id}:day:${date}` };
+  }, [periodOffset, potMode, circle, progress?.week_start]);
+
+  // En gången period ändras inte, så den hämtas en gång per bläddring och
+  // inte i load()s fyrsekunderspoll. Ett svar som kommer efter att man
+  // bläddrat vidare kastas.
+  const periodKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    periodKeyRef.current = periodRequest?.key ?? null;
+    if (!periodRequest || !circle) return;
+    const { key, mode, date } = periodRequest;
+    getCirclePeriod(circle.id, mode, date).then(data => {
+      if (periodKeyRef.current === key) setPastPeriod({ key, data });
+    });
+  }, [periodRequest?.key]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Hur långt bakåt det går: till kretsens första dag. Perioden före den som
+  // visas måste ha slutat efter att kretsen skapades.
+  const circleStart = circle?.created_at ? new Date(circle.created_at).getTime() : null;
+  const canGoBack = (() => {
+    if (circleStart === null) return true;
+    if (potMode === 'week') {
+      if (!progress?.week_start) return false;
+      const prevEnd = new Date(`${shiftWeek(progress.week_start, periodOffset - 1)}T00:00:00Z`).getTime() + 7 * DAY_MS;
+      return prevEnd > circleStart;
+    }
+    return localDay(periodOffset).getTime() > circleStart;
+  })();
+  const canGoForward = periodOffset < 0;
+  const stepPeriod = (dir: 1 | -1) => {
+    if (dir === -1 && !canGoBack) return;
+    if (dir === 1 && !canGoForward) return;
+    setPeriodOffset(o => o + dir);
+  };
+
+  // Inget svep över ringen. Det fanns en kort stund och togs bort på
+  // begäran: ett vågrätt drag mitt i en lodrät sida blev lätt en rullning i
+  // stället. Pilarna på datumraden är enda vägen.
 
   useEffect(() => {
     if (!user) return;
@@ -1223,7 +1345,7 @@ function CircleScreen() {
     setSelectedCircle(id);
     setSelectedCircleId(id);
     const next = myCircles.find(c => c.id === id);
-    setCircle(next ? { id: next.id, name: next.name, settings: next.settings } : null);
+    setCircle(next ? { id: next.id, name: next.name, settings: next.settings, created_at: next.created_at } : null);
     setProgress(null);
     setMembers([]);
     setActivity([]);
@@ -1271,6 +1393,7 @@ function CircleScreen() {
   };
 
   const openMembersModal = async () => {
+    setMenuPage('menu');
     setShowMembersModal(true);
     if (!user) return;
     // Alla relationer jag är part i, oavsett riktning — en vänskap kan vara
@@ -1407,6 +1530,7 @@ function CircleScreen() {
       <CircleTitle
         title={adding ? 'Another circle' : (circle?.name ?? '')}
         onPress={adding || !circle ? undefined : openMembersModal}
+        dot={!adding && !!circle && !!user && circle.settings.rewards_enabled && awaitsMyVote(reward, user.id)}
       />
     </View>
   );
@@ -1470,37 +1594,10 @@ function CircleScreen() {
       {unreadChat > 0 && <View style={styles.unreadDot} />}
     </TouchableOpacity>
   );
-  // Ramen och bottnen är desamma som "See the week that passed" i den egna
-  // statistiken — ändras ytan i den ena måste den ändras i den andra.
-  const weekButton = (
-    <TouchableOpacity
-      style={styles.wrappedBtn}
-      onPress={() => router.push({ pathname: '/circle-wrapped', params: { circleId: circle.id } } as any)}
-      activeOpacity={0.8}
-      accessibilityRole="button"
-      accessibilityLabel="See the week that passed"
-    >
-      <MaterialIcons name="insights" size={20} color={Palette.hue} />
-    </TouchableOpacity>
-  );
-
-  // Belöningen: en stjärna i en lagerkrans, fylld när kretsen har en
-  // belöning. Pricken betyder samma sak som chattens — något väntar på en
-  // själv — och här är det att man inte lagt sin röst än. Ingen siffra, av
-  // samma skäl som chatten.
+  // Belöningen och veckan bor i kretsens meny (tryck på namnet), inte i
+  // rubrikraden — se `showMembersModal` nedan. Pricken för en ej lagd röst
+  // står därför på namnets `⌄` och på menyns rad.
   const awaitingReward = awaitsMyVote(reward, user.id);
-  const rewardButton = (
-    <TouchableOpacity
-      style={styles.wrappedBtn}
-      onPress={() => setShowRewardModal(true)}
-      activeOpacity={0.8}
-      accessibilityRole="button"
-      accessibilityLabel={awaitingReward ? 'Open the circle reward. New suggestions.' : 'Open the circle reward'}
-    >
-      <RewardWreathIcon size={28} color={Palette.hue} filled={!!reward?.current} />
-      {awaitingReward && <View style={styles.unreadDot} />}
-    </TouchableOpacity>
-  );
 
   // Ringvyn: ett tryck på en bricka visar den medlemmen i den stora ringen;
   // ett tryck till på samma bricka (eller på ringen, som skickar `null`) går
@@ -1509,15 +1606,36 @@ function CircleScreen() {
   const selectTile = (id: string | null) =>
     setSelectedMemberId(prev => (id === null || prev === id ? null : id));
 
+  // En gången period: samma ring, med medlemmarna som var med då. Medan nästa
+  // period hämtas står den förra kvar hellre än att ringen blinkar tom.
+  const past = periodOffset < 0;
+  const pastData = past ? (pastPeriod?.data ?? null) : null;
+  // Den valda medlemmen får aldrig falla bort när man bläddrar — då visade
+  // ringen plötsligt EVERYONE. Medan perioden hämtas (eller om hämtningen
+  // föll) står de nuvarande medlemmarna kvar med tomma tal, och den som är
+  // vald men inte var med då läggs till med noll.
+  const pastMembers: MemberRow[] = pastData
+    ? pastData.members.map(m => ({
+        id: m.user_id, username: m.username, avatar_url: m.avatar_url, role: 'member',
+      }))
+    : members;
+  if (pastData && selectedMemberId && !pastMembers.some(m => m.id === selectedMemberId)) {
+    const sel = members.find(m => m.id === selectedMemberId);
+    if (sel) pastMembers.push(sel);
+  }
+  const pastByUser = new Map<string, CircleMemberProgress>((pastData?.members ?? []).map(m => [m.user_id, m]));
+  const pastFormerIds = new Set((pastData?.members ?? []).filter(m => !m.is_member).map(m => m.user_id));
+
   return (
     <View style={styles.container}>
       <ScrollView ref={scrollRef} showsVerticalScrollIndicator={false} contentContainerStyle={[styles.scrollContent, { paddingTop: Math.max(60, insets.top + 8) }]}>
 
         {/* Rubriken är kretsraden (se CircleTitleStrip): den valda kretsens
             namn stort, de andra bredvid. Under den nivån till vänster och
-            kretsens tre knappar till höger — belöningen, veckan, chatten.
-            Knapparna stod förr bredvid namnet, men där behöver namnen nu
-            bredden (prövat igen och flyttat tillbaka). */}
+            chatten till höger. Belöningen och veckan stod förr bredvid
+            chatten och flyttade in i menyn bakom namnet på begäran — sidan
+            skulle vara renare. Chatten stannar: den används oftast och dess
+            prick måste synas. */}
         <View style={styles.header}>
           {switcher}
           <View style={styles.levelActionsRow}>
@@ -1540,10 +1658,6 @@ function CircleScreen() {
               </View>
             </TouchableOpacity>
             <View style={styles.headerActions}>
-              {/* Belöningen är valfri per krets (ägarens val), och knappen
-                  finns bara när den är på. */}
-              {circle.settings.rewards_enabled && rewardButton}
-              {weekButton}
               {chatButton}
             </View>
           </View>
@@ -1568,28 +1682,76 @@ function CircleScreen() {
               <SegmentedPill
                 options={POT_PILL}
                 value={potMode}
-                onChange={setPotMode}
+                onChange={changePotMode}
                 width={PILL_W_POT}
               />
             </View>
+            {/* Datumraden är navigatorn: pilarna visar att svepet finns och
+                är vägen för skärmläsare, som inte kan svepa. Framåt är grå i
+                nuet, bakåt vid kretsens första dag. */}
             {progress && (
-              <Text style={styles.weekRange} numberOfLines={1}>
-                {potMode === 'day' ? formatToday() : formatWeekRange(progress.week_start, circle.settings.count_workdays)}
-              </Text>
+              <View style={styles.periodNav}>
+                <Pressable
+                  onPress={() => stepPeriod(-1)}
+                  disabled={!canGoBack}
+                  hitSlop={12}
+                  style={styles.periodArrow}
+                  accessibilityRole="button"
+                  accessibilityState={{ disabled: !canGoBack }}
+                  accessibilityLabel={potMode === 'day' ? 'Previous day' : 'Previous week'}
+                >
+                  <FontAwesome5 name="chevron-left" size={12} color={canGoBack ? Palette.hue : Palette.textDisabled} />
+                </Pressable>
+                <Text style={styles.weekRange} numberOfLines={1}>
+                  {potMode === 'day'
+                    ? (past ? formatPastDay(localDay(periodOffset)) : formatToday())
+                    : formatWeekRange(shiftWeek(progress.week_start, periodOffset), circle.settings.count_workdays)}
+                </Text>
+                <Pressable
+                  onPress={() => stepPeriod(1)}
+                  disabled={!canGoForward}
+                  hitSlop={12}
+                  style={styles.periodArrow}
+                  accessibilityRole="button"
+                  accessibilityState={{ disabled: !canGoForward }}
+                  accessibilityLabel={potMode === 'day' ? 'Next day' : 'Next week'}
+                >
+                  <FontAwesome5 name="chevron-right" size={12} color={canGoForward ? Palette.hue : Palette.textDisabled} />
+                </Pressable>
+              </View>
             )}
+            {/* Vägen tillbaka till nu. Alltid renderad och bara osynlig i
+                nuet, så att ringen inte hoppar ner när man bläddrar bakåt. */}
+            <TouchableOpacity
+              onPress={() => setPeriodOffset(0)}
+              disabled={!past}
+              style={[styles.periodBack, !past && { opacity: 0 }]}
+              hitSlop={8}
+              accessibilityElementsHidden={!past}
+              importantForAccessibility={past ? 'auto' : 'no-hide-descendants'}
+              accessibilityRole="button"
+            >
+              <Text style={styles.periodBackText}>
+                {potMode === 'day' ? 'BACK TO TODAY ›' : 'BACK TO THIS WEEK ›'}
+              </Text>
+            </TouchableOpacity>
           </View>
 
           <CircleRings
             mode={potMode}
             width={pageWidth}
-            progress={progress}
-            members={members}
-            byUser={byUser}
+            progress={past ? pastData : progress}
+            members={past ? pastMembers : members}
+            byUser={past ? pastByUser : byUser}
             meId={user.id}
             selectedId={selectedMemberId}
             onSelect={selectTile}
             onOpenGoal={openGoalModal}
             statusLine={remainingLine}
+            replayKey={`${potMode}:${periodOffset}`}
+            past={past}
+            formerIds={past ? pastFormerIds : undefined}
+            goalsKnown={past ? (pastData?.goals_known ?? true) : true}
           />
           {/* Totalkortet (summan, mätaren och *See everyone*) står inte i
               ringvyn: summan står i ringen, och varje medlems tal står på
@@ -1600,7 +1762,7 @@ function CircleScreen() {
           <SegmentedPill
             options={POT_PILL}
             value={potMode}
-            onChange={setPotMode}
+            onChange={changePotMode}
             width={PILL_W_POT}
           />
 
@@ -1830,31 +1992,21 @@ function CircleScreen() {
       </Modal>
 
 
-      <Modal visible={showMembersModal} transparent animationType="fade" onRequestClose={() => setShowMembersModal(false)}>
-        <View style={styles.backdrop}>
+      {/* Kretsens meny: ett tryck på namnet. Den var medlemslistan och växte
+          till menyn när belöningen och veckan flyttade ut ur rubrikraden.
+          Ett ark nerifrån, som att göra-arket och taggkortet. Två sidor i
+          samma kort (`menuPage`): menyn, och medlemslistan ett steg in. */}
+      <Modal visible={showMembersModal} transparent animationType="fade" onRequestClose={() => {
+        if (menuPage === 'members') setMenuPage('menu');
+        else setShowMembersModal(false);
+      }}>
+        <View style={styles.sheetBackdrop}>
           <Pressable style={StyleSheet.absoluteFill} onPress={() => setShowMembersModal(false)} />
-          <View style={styles.card}>
-            {/* Inbjudan är en ikon uppe till höger: den hör till vilka som är
-                med, men en hel rad ovanför utgången var för mycket. Full krets
-                ger en grå ikon som inte går att trycka på — varför står i
-                accessibilityLabel. */}
-            <TouchableOpacity
-              onPress={() => {
-                setShowMembersModal(false);
-                router.push({ pathname: '/circle-invite', params: { circleId: circle.id } } as any);
-              }}
-              style={styles.inviteMembersBtn}
-              disabled={members.length >= MAX_MEMBERS}
-              activeOpacity={0.7}
-              hitSlop={8}
-              accessibilityRole="button"
-              accessibilityState={{ disabled: members.length >= MAX_MEMBERS }}
-              accessibilityLabel={members.length >= MAX_MEMBERS ? 'The circle is full' : 'Invite a friend to the circle'}
-            >
-              <FontAwesome5 name="user-plus" size={13} color={members.length >= MAX_MEMBERS ? Palette.textDisabled : Palette.hue} />
-            </TouchableOpacity>
-            <Text style={styles.cardTitle}>{circle.name}</Text>
-            <Text style={styles.hintText}>Group members</Text>
+          <View style={[styles.sheet, { paddingBottom: safeBottom(insets.bottom) + Spacing.lg }]}>
+            <View style={styles.sheetGrip} />
+            {menuPage === 'menu' ? (
+            <>
+            <Text style={styles.sheetTitle} numberOfLines={1}>{circle.name}</Text>
 
             {/* Kretsens inställningar i en rad: vad som räknas och om det
                 finns en belöning. Ägaren trycker för att ändra; för andra är
@@ -1877,6 +2029,119 @@ function CircleScreen() {
               </View>
               {iAmOwner && <FontAwesome5 name="sliders-h" size={14} color={Palette.hue} />}
             </TouchableOpacity>
+
+            {/* Medlemmarna som ansikten — listan med vän-knappar, inbjudan
+                och borttagning ligger ett steg in. */}
+            <TouchableOpacity
+              style={styles.menuRow}
+              onPress={() => setMenuPage('members')}
+              activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel={`${members.length} ${members.length === 1 ? 'member' : 'members'}. See members.`}
+            >
+              <View style={styles.faceStack}>
+                {members.slice(0, 6).map((m, i) => (
+                  <View key={m.id} style={[styles.faceRing, i > 0 && styles.faceOverlap]}>
+                    <Avatar username={m.username} avatarUrl={m.avatar_url} size={30} />
+                  </View>
+                ))}
+              </View>
+              <Text style={styles.menuRowLabel} numberOfLines={1}>
+                {members.length} {members.length === 1 ? 'member' : 'members'}
+              </Text>
+              <FontAwesome5 name="chevron-right" size={12} color={Palette.textTertiary} />
+            </TouchableOpacity>
+
+            <View style={styles.menuDivider} />
+
+            {/* Belöningen är valfri per krets (ägarens val), och raden finns
+                bara när den är på. Menyn stängs innan arket öppnas, av samma
+                skäl som inställningsraden ovan. */}
+            {circle.settings.rewards_enabled && (
+              <TouchableOpacity
+                style={styles.menuRow}
+                onPress={() => { setShowMembersModal(false); setShowRewardModal(true); }}
+                activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityLabel={awaitingReward ? 'Open the circle reward. New suggestions.' : 'Open the circle reward'}
+              >
+                <View style={styles.menuIcon}>
+                  <RewardWreathIcon size={24} color={Palette.hue} filled={!!reward?.current} />
+                </View>
+                <Text style={styles.menuRowLabel}>Reward</Text>
+                {!!reward?.current && (
+                  <Text style={styles.menuRowMeta} numberOfLines={1}>{reward.current.text}</Text>
+                )}
+                {awaitingReward && <View style={styles.menuDot} />}
+                <FontAwesome5 name="chevron-right" size={12} color={Palette.textTertiary} />
+              </TouchableOpacity>
+            )}
+
+            <TouchableOpacity
+              style={styles.menuRow}
+              onPress={() => {
+                setShowMembersModal(false);
+                router.push({ pathname: '/circle-wrapped', params: { circleId: circle.id } } as any);
+              }}
+              activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel="See the week that passed"
+            >
+              <View style={styles.menuIcon}>
+                <MaterialIcons name="insights" size={20} color={Palette.hue} />
+              </View>
+              <Text style={styles.menuRowLabel}>This week</Text>
+              <FontAwesome5 name="chevron-right" size={12} color={Palette.textTertiary} />
+            </TouchableOpacity>
+
+            {/* Utgången bor här, skild från raderna med en linje: att lämna
+                ska inte gå att träffa av misstag. Samma `handleLeave` och
+                samma bekräftelse som förut. */}
+            <TouchableOpacity
+              onPress={handleLeave}
+              style={styles.leaveBtn}
+              disabled={busyAction}
+              activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel={`Leave ${circle.name}`}
+            >
+              <FontAwesome5 name="sign-out-alt" size={13} color={Palette.danger} />
+              <Text style={styles.leaveBtnText}>Leave circle</Text>
+            </TouchableOpacity>
+            </>
+            ) : (
+            <>
+            {/* Medlemslistan, ett steg in. Inbjudan är en ikon till höger på
+                rubrikraden: den hör till vilka som är med. Full krets ger en
+                grå ikon som inte går att trycka på — varför står i
+                accessibilityLabel. */}
+            <View style={styles.sheetPageHeader}>
+              <TouchableOpacity
+                onPress={() => setMenuPage('menu')}
+                style={styles.sheetBack}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel={`Back to ${circle.name}`}
+              >
+                <FontAwesome5 name="chevron-left" size={14} color={Palette.hue} />
+              </TouchableOpacity>
+              <Text style={styles.sheetPageTitle} numberOfLines={1}>Members</Text>
+              <TouchableOpacity
+                onPress={() => {
+                  setShowMembersModal(false);
+                  router.push({ pathname: '/circle-invite', params: { circleId: circle.id } } as any);
+                }}
+                style={styles.inviteMembersBtn}
+                disabled={members.length >= MAX_MEMBERS}
+                activeOpacity={0.7}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityState={{ disabled: members.length >= MAX_MEMBERS }}
+                accessibilityLabel={members.length >= MAX_MEMBERS ? 'The circle is full' : 'Invite a friend to the circle'}
+              >
+                <FontAwesome5 name="user-plus" size={13} color={members.length >= MAX_MEMBERS ? Palette.textDisabled : Palette.hue} />
+              </TouchableOpacity>
+            </View>
 
             <ScrollView style={styles.memberList} showsVerticalScrollIndicator={false}>
               {members.map(m => {
@@ -1941,26 +2206,8 @@ function CircleScreen() {
                 );
               })}
             </ScrollView>
-
-            {/* Utgången bor här, under listan och skild från den med en
-                linje: det egna medlemskapet är en del av listan, men att
-                lämna ska inte gå att träffa av misstag medan man bläddrar.
-                Samma `handleLeave` och samma bekräftelse som förut. */}
-            <TouchableOpacity
-              onPress={handleLeave}
-              style={styles.leaveBtn}
-              disabled={busyAction}
-              activeOpacity={0.7}
-              accessibilityRole="button"
-              accessibilityLabel={`Leave ${circle.name}`}
-            >
-              <FontAwesome5 name="sign-out-alt" size={13} color={Palette.danger} />
-              <Text style={styles.leaveBtnText}>Leave circle</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity onPress={() => setShowMembersModal(false)} style={styles.cancelLink}>
-              <Text style={styles.cancelLinkText}>Close</Text>
-            </TouchableOpacity>
+            </>
+            )}
           </View>
         </View>
       </Modal>
@@ -2016,10 +2263,8 @@ const makeStyles = (Palette: AppPalette) => StyleSheet.create({
 
   header: { gap: 6 },
   title: { fontSize: 30, fontWeight: '900', color: Palette.textPrimary, letterSpacing: -0.3, flexShrink: 1 },
-  headerActions: { flexDirection: 'row', gap: Spacing.sm },  // Samma geometri OCH samma botten som wrappedBtn; det är ramen och ikonen
-  // som bär accent i stället för accentSoft, så de är jämbördiga i form och
-  // inte i tyngd. Ändras måtten i den ena måste de ändras i den andra,
-  // annars blir stapeln ojämn.
+  headerActions: { flexDirection: 'row', gap: Spacing.sm },
+  // Samma geometri och samma botten som veckoknappen i stats.tsx.
   //
   // Bottnen är `surface` och inte en tonad accent: i ljust läge lade den
   // tonen en blågrå skugga över en vit sida, vilket läste som en intryckt
@@ -2045,15 +2290,6 @@ const makeStyles = (Palette: AppPalette) => StyleSheet.create({
     width: 11, height: 11, borderRadius: 5.5,
     backgroundColor: Palette.accent,
     borderWidth: 2, borderColor: Palette.surface,
-  },
-  // Samma yta som "See the week that passed" i stats.tsx — tonad botten, ram
-  // och radie — men kvadratisk, eftersom texten är borta och bara ikonen står
-  // kvar. Ändras tonen i den ena bör den ändras i den andra.
-  wrappedBtn: {
-    alignItems: 'center', justifyContent: 'center',
-    backgroundColor: Palette.surface,
-    borderRadius: 12, borderWidth: 1, borderColor: alpha(Palette.hue, 0.2),
-    width: 44, height: 44,
   },
   levelBadgeBtn: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', gap: 6, paddingVertical: 2, flexShrink: 1 },
   levelBadgeRow: { flexDirection: 'row', alignItems: 'center', gap: 7, flexShrink: 1 },
@@ -2105,11 +2341,46 @@ const makeStyles = (Palette: AppPalette) => StyleSheet.create({
   },
   settingsRowText: { fontSize: 14, fontWeight: '700', color: Palette.textPrimary },
   settingsRowMeta: { fontSize: 12, color: Palette.textTertiary, marginTop: 2 },
-  // Inbjudan i medlemslistan: en rund ikon i kortets övre högra hörn, i
-  // rummets kulör. Ligger ovanpå rubrikens rad, som är centrerad och har
-  // plats på sidorna.
+  // ── Kretsens meny (arket bakom namnet) ──
+  // Pricken på namnets `⌄`: samma accent som chattens prick, inline i raden
+  // så att den följer med när namnet krymper.
+  titleDot: {
+    width: 9, height: 9, borderRadius: 4.5, marginLeft: -4,
+    backgroundColor: Palette.accent,
+  },
+  sheetBackdrop: { flex: 1, backgroundColor: Palette.scrim, justifyContent: 'flex-end' },
+  sheet: {
+    backgroundColor: Palette.modalSurface,
+    borderTopLeftRadius: Radius.xl, borderTopRightRadius: Radius.xl,
+    borderWidth: 1, borderBottomWidth: 0, borderColor: Palette.modalBorder,
+    paddingHorizontal: Spacing.xl, paddingTop: Spacing.sm, gap: Spacing.sm,
+  },
+  sheetGrip: {
+    alignSelf: 'center', width: 36, height: 4, borderRadius: 2,
+    backgroundColor: Palette.ink22, marginBottom: Spacing.sm,
+  },
+  sheetTitle: { fontSize: 20, fontWeight: '900', color: Palette.textPrimary, marginBottom: Spacing.xs },
+  menuRow: {
+    flexDirection: 'row', alignItems: 'center', gap: Spacing.md,
+    minHeight: 52, paddingVertical: Spacing.sm,
+  },
+  menuIcon: { width: 30, alignItems: 'center', justifyContent: 'center' },
+  menuRowLabel: { fontSize: 15, fontWeight: '700', color: Palette.textPrimary, flexShrink: 0 },
+  // Belöningens text står till höger om etiketten och krymper först.
+  menuRowMeta: { flex: 1, fontSize: 14, color: Palette.textTertiary, textAlign: 'right' },
+  menuDot: { width: 9, height: 9, borderRadius: 4.5, backgroundColor: Palette.accent },
+  menuDivider: { height: 1, backgroundColor: Palette.surfaceBorder },
+  // Ansiktena överlappar lite, med en ring i arkets yta runt varje så att
+  // kanterna syns mot varandra.
+  faceStack: { flexDirection: 'row', flex: 1 },
+  faceRing: { borderRadius: 17, borderWidth: 2, borderColor: Palette.modalSurface },
+  faceOverlap: { marginLeft: -10 },
+  sheetPageHeader: { flexDirection: 'row', alignItems: 'center', gap: Spacing.md, marginBottom: Spacing.xs },
+  sheetBack: { width: 36, height: 36, borderRadius: Radius.pill, alignItems: 'center', justifyContent: 'center', backgroundColor: Palette.hueTint },
+  sheetPageTitle: { flex: 1, fontSize: 18, fontWeight: '800', color: Palette.textPrimary },
+  // Inbjudan i medlemslistan: en rund ikon till höger på sidans rubrikrad,
+  // i rummets kulör — tvilling till bakåtknappen till vänster.
   inviteMembersBtn: {
-    position: 'absolute', top: Spacing.lg, right: Spacing.lg, zIndex: 1,
     width: 36, height: 36, borderRadius: Radius.pill,
     alignItems: 'center', justifyContent: 'center',
     backgroundColor: Palette.hueTint,
@@ -2151,6 +2422,12 @@ const makeStyles = (Palette: AppPalette) => StyleSheet.create({
   // står kvar där det stod, därav det större gapet.
   periodBlock: { alignItems: 'center', gap: 14 },
   periodPill: { marginTop: -10 },
+  // Datumraden med pilarna på var sin sida.
+  periodNav: { flexDirection: 'row', alignItems: 'center', gap: Spacing.md },
+  periodArrow: { width: 28, height: 28, alignItems: 'center', justifyContent: 'center' },
+  // *Back to this week* — tätt under datumet, i rummets kulör.
+  periodBack: { marginTop: -10 },
+  periodBackText: { fontSize: 12, fontWeight: '800', letterSpacing: 1.2, color: Palette.hue },
   // Luft över och under ringen, så att den står fritt och inte klämd mellan
   // periodvalet och brickorna.
   heroRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginVertical: Spacing.lg },

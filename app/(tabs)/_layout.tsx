@@ -2,12 +2,13 @@ import { FontAwesome, FontAwesome5 } from '@expo/vector-icons';
 import type { BottomTabNavigationOptions } from '@react-navigation/bottom-tabs';
 import { Tabs, usePathname } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
-import { Easing, Platform, View } from 'react-native';
+import { Easing, View } from 'react-native';
 import { useReducedMotion } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { RoomTabBar } from '../../components/room-tab-bar';
 import { useAuth } from '../../contexts/AuthContext';
 import { countUnreadCircleMessages } from '../../lib/circleChat';
+import { safeBottom } from '../../lib/bottomInset';
 import { CIRCLE_MAX_PER_USER, getMyCircles } from '../../lib/circles';
 import { useHomeMode } from '../../lib/homeMode';
 import { countOpenPauseInvites } from '../../lib/pauseInvites';
@@ -16,19 +17,7 @@ import { unopenedResponsesQuery } from '../../lib/supportStories';
 import { usePalette, useTheme } from '../../contexts/ThemeContext';
 import { RoomName, roomPalette } from '../../constants/appTheme';
 
-/**
- * Golv för botteninsetet på Android.
- *
- * Flera Samsung-användare rapporterade att systemets egna knappar låg ovanpå
- * flikraden. `insets.bottom` ensamt räckte inte: på en del Android-skal
- * kommer den tillbaka som 0 eller några få punkter trots att navigeringsfältet
- * eller gest-strecket faktiskt ritas där — och då hamnar etiketterna under
- * dem. Golvet gör att raden alltid har något att stå på, och på en telefon
- * som rapporterar rätt (48 för tre knappar) ändrar `Math.max` ingenting.
- *
- * iOS får 0: där stämmer insetet, och ett golv hade bara lyft raden i onödan.
- */
-const ANDROID_INSET_FLOOR = Platform.OS === 'android' ? 24 : 0;
+// Golvet för botteninsetet på Android bor i lib/bottomInset.ts — se där.
 
 /**
  * Luft under etiketterna utöver systemets inset — själva lyftet.
@@ -100,7 +89,7 @@ export default function TabLayout() {
   const Palette = usePalette();
   const { mode } = useTheme();
   const insets = useSafeAreaInsets();
-  const bottomInset = Math.max(insets.bottom, ANDROID_INSET_FLOOR);
+  const bottomInset = safeBottom(insets.bottom);
   const { user } = useAuth();
   const pathname = usePathname();
   // Hem i nattläge står i `night`-rummet, och botten bakom scenerna följer

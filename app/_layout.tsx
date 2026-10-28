@@ -22,7 +22,7 @@ import {
 } from '../lib/notifications';
 import { supabase } from '../lib/supabase';
 import { closePauseInvites, finishPauseInvite } from '../lib/pauseInvites';
-import { setPausingFlag } from '../lib/pausingFlag';
+import { clearStalePausingFlag, setPausingFlag } from '../lib/pausingFlag';
 import { flushOutbox } from '../lib/sessionOutbox';
 import { markNightEnded } from '../lib/homeMode';
 import { saveSleepSession } from '../lib/sleep';
@@ -488,6 +488,29 @@ function InnerLayout() {
     if (!user?.id || pausingFlagResetRef.current) return;
     pausingFlagResetRef.current = true;
     setPausingFlag(user.id, false);
+  }, [user?.id]);
+
+  // Samma nollning varje gång appen kommer fram, inte bara vid kallstart. iOS
+  // låter en app ligga i bakgrunden i dagar, så en nollning som föll vid
+  // starten (nät, token som inte hunnit förnyas) stod annars kvar till nästa
+  // kallstart — en vän stod som pausande ett helt dygn så. Två villkor, och
+  // båda behövs: `/pausing` är den lådlösa pausen, och reducerns fas är
+  // lådans, som kan pågå medan appen står på en helt annan skärm.
+  // `clearStalePausingFlag` skriver bara när flaggan inte redan bekräftats
+  // `false`, så de flesta återkomster kostar ingenting.
+  const pathnameRef = useRef(pathname);
+  pathnameRef.current = pathname;
+  const sessionPhaseRef = useRef(sessionState.phase);
+  sessionPhaseRef.current = sessionState.phase;
+  useEffect(() => {
+    if (!user?.id) return;
+    const uid = user.id;
+    const sub = AppState.addEventListener('change', next => {
+      if (next !== 'active') return;
+      if (pathnameRef.current === '/pausing' || sessionPhaseRef.current !== 'idle') return;
+      clearStalePausingFlag(uid);
+    });
+    return () => sub.remove();
   }, [user?.id]);
 
   // Recover any session that was interrupted by the app being killed

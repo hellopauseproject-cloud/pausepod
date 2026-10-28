@@ -34,18 +34,57 @@ import { supabase } from './supabase';
  */
 let chain: Promise<void> = Promise.resolve();
 
+/**
+ * Det senast **bekräftade** värdet i databasen, eller `null` när vi inte vet.
+ * Låter `clearStalePausingFlag` hoppa över skrivningen när flaggan redan
+ * bevisligen är `false`, så att varje återkomst till appen inte blir ett anrop.
+ */
+let confirmed: boolean | null = null;
+
+/**
+ * Tre försök med en kort väntan emellan. Taket är inte en detalj: omförsöken
+ * står i samma kö som allt annat, och ett `false` som aldrig gav upp hade
+ * hållit nästa paus `true` borta för alltid.
+ */
+const ATTEMPTS = 3;
+const RETRY_DELAY_MS = 2000;
+
+const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
+
 export function setPausingFlag(userId: string, value: boolean): Promise<void> {
   const next = chain.then(async () => {
-    try {
-      const { error } = await supabase
-        .from('profiles')
-        .update({ is_pausing: value })
-        .eq('id', userId);
-      if (error) console.log('[pausingFlag] set', value, 'failed:', error.message);
-    } catch (e: any) {
-      console.log('[pausingFlag] set', value, 'threw:', e?.message ?? e);
+    confirmed = null;
+    for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+      try {
+        // Raderna räknas (`.select('id')`): RLS på `profiles` släpper bara
+        // igenom `auth.uid() = id`, och ett anrop som går ut innan token
+        // förnyats uppdaterar noll rader UTAN fel. Så kunde en nollning vid
+        // appstart "lyckas" och lämna en vän som pausande i ett dygn.
+        const { data, error } = await supabase
+          .from('profiles')
+          .update({ is_pausing: value })
+          .eq('id', userId)
+          .select('id');
+        if (!error && (data?.length ?? 0) > 0) {
+          confirmed = value;
+          return;
+        }
+        console.log('[pausingFlag] set', value, 'attempt', attempt, 'failed:', error?.message ?? 'no rows updated');
+      } catch (e: any) {
+        console.log('[pausingFlag] set', value, 'attempt', attempt, 'threw:', e?.message ?? e);
+      }
+      if (attempt < ATTEMPTS) await wait(RETRY_DELAY_MS);
     }
   });
   chain = next;
   return next;
+}
+
+/**
+ * Nollningen när appen kommer fram, se `app/_layout.tsx`. Anroparen avgör att
+ * ingen paus pågår; här avgörs bara om det behöver skrivas alls.
+ */
+export function clearStalePausingFlag(userId: string): Promise<void> {
+  if (confirmed === false) return chain;
+  return setPausingFlag(userId, false);
 }

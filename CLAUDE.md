@@ -917,7 +917,14 @@ Status i appen: alla fyra är implementerade. Se
   ärliga pauser i testveckan, dels Android-telefoner vars accelerometer
   brusar över grinden på ett bord (0,3–0,6 m/s² vid 0,02°/s), dels telefoner
   som låses i samma rörelse som de läggs ner. Provet läser därför bara
-  gyrot, i ett kort fönster (`SETTLE_WINDOW_MS`). **En beröring medan klockan går fryser
+  gyrot, i ett kort fönster (`SETTLE_WINDOW_MS`). **Omstarten gäller bara
+  ett kort avbrott:** har klockan stått frusen längre än
+  `BACKGROUND_RESTART_MAX_FROZEN_MS` (10 min) startar den bara om appen
+  öppnas och telefonen läggs ner igen (händelsen `pause_restart_blocked`).
+  Utan taket gick en paus som frös 21:56 igång igen 01:04, när iOS väckte
+  appen en stund och telefonen låg på nattduksbordet — natten räknades som
+  paus och vännen stod som *pausing now*. Natten undantas: där är omstarten
+  efter ett uppvaknande hela poängen. **En beröring medan klockan går fryser
   den** (`freezeOnTouch`, händelsen `pause_touched`), för ett bord rör aldrig
   skärmen, och klockan går igen först när telefonen vänts upp och lagts ner
   på nytt. Systemknapparna ligger utanför appen, så **på Android är

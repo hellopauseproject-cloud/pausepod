@@ -124,6 +124,18 @@ function assessSettled(samples: MotionSample[], now: number) {
   return { settled, maxRot, samples: recent.length };
 }
 
+// ── Hur länge klockan får ha stått frusen och ändå starta i bakgrunden ──
+//
+// Omstarten ovan är till för ett kort avbrott — telefonen stöttes till på
+// bordet, flyttades, låstes i samma rörelse som den lades ner. Utan tak
+// startade den också timmar senare: en paus som frös 21:56 när telefonen
+// lyftes gick igen 01:04, när iOS väckte appen en stund i bakgrunden och
+// telefonen låg på nattduksbordet. Natten räknades då som paus. Har klockan
+// stått frusen längre än så här startar den bara om appen öppnas och
+// telefonen läggs ner igen. Gäller inte natten: där är ett uppvaknande vid
+// tre och en telefon som läggs tillbaka precis vad omstarten finns för.
+const BACKGROUND_RESTART_MAX_FROZEN_MS = 10 * 60 * 1000;
+
 function generateLocalSeq(): string {
   return `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 }
@@ -155,6 +167,10 @@ function PausingScreen() {
   const styles = useMemo(() => makeStyles(Palette), [Palette]);
   const { user } = useAuth();
   const { state, dispatch } = useSession();
+  // Sensorlyssnaren monteras en gång och ser annars bara första renderns state.
+  const respiteStartedAtRef = useRef(state.respiteStartedAt);
+  respiteStartedAtRef.current = state.respiteStartedAt;
+  const restartBlockedForRef = useRef<number | null>(null);
   const {
     category,
     sharedSessionId,
@@ -470,6 +486,17 @@ function PausingScreen() {
         //    avläsning prövar igen tills telefonen lagt sig eller sensorn
         //    tystnat.
         if (down && !appActiveRef.current) {
+          //    Och bara efter ett kort avbrott (BACKGROUND_RESTART_MAX_FROZEN_MS).
+          //    Händelsen loggas en gång per frysning, så att taket kan prövas
+          //    mot hur ofta det slår till.
+          const frozenAt = respiteStartedAtRef.current;
+          if (!isSleep && frozenAt !== null && nowMs - frozenAt > BACKGROUND_RESTART_MAX_FROZEN_MS) {
+            if (restartBlockedForRef.current !== frozenAt) {
+              restartBlockedForRef.current = frozenAt;
+              track('pause_restart_blocked', { frozen_minutes: Math.round((nowMs - frozenAt) / 60000) });
+            }
+            return;
+          }
           const settle = assessSettled(win, nowMs);
           if (!settle.settled) return;
           console.log('FaceDown: lade sig still efter att appen lämnats, rot=',

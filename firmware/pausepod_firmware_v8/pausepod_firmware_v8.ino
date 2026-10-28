@@ -653,11 +653,37 @@ void drawCheck(int cx, int cy, int size, int thickness, float progress, uint16_t
   }
 }
 
-// Mjuk gloria bakom pausmärket. Står still — det är inte bakgrunden som rör
-// sig, det är märket som lyser.
+// Mjuk gloria bakom pausmärket, räknad pixel för pixel: ljusast närmast
+// märket och borta vid kanten, utan trappsteg. Står still — det är inte
+// bakgrunden som rör sig, det är märket som lyser.
+//
+// En gloria behöver många mellantoner av blått, och i 8 bitar (PSRAM av)
+// finns bara fyra blå nivåer: den blev hackiga ringar. Där ritas ingen.
+bool deepColor = true;   // sätts i setup(): 16 bitar = PSRAM finns
+
+const uint8_t BAYER4[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
+
 void drawHalo(int cx, int cy, int r, float k) {
-  for (int i = 0; i < 7; i++) {
-    sprite.fillSmoothCircle(cx, cy, r - i * 5, fadeIn(C_ACCENT, (0.05 + 0.035 * i) * k));
+  if (!deepColor || k <= 0.0) return;
+  const float PEAK = 0.30;   // hur starkt den lyser mitt bakom märket
+  const float r2 = (float)r * r;
+  for (int y = -r; y <= r; y++) {
+    for (int x = -r; x <= r; x++) {
+      float d2 = (float)x * x + (float)y * y;
+      if (d2 >= r2) continue;
+      float t = 1.0 - sqrtf(d2) / r;      // 1 i mitten, 0 vid kanten
+      float a = t * t * (3.0 - 2.0 * t);  // smoothstep: mjuk ut mot kanten
+      float m = a * PEAK * k;
+      // Bayer-dither: skärmen har 32 nivåer rött/blått och 64 grönt, och i
+      // de mörka tonerna syns stegen som ringar. Ett fint mönster av ±ett
+      // halvt steg får ögat att se mellantonerna i stället.
+      float n = (BAYER4[(y + r) & 3][(x + r) & 3] + 0.5) / 16.0 - 0.5;
+      float rr = C_BG.r + (C_ACCENT.r - C_BG.r) * m + n * 8.0;
+      float gg = C_BG.g + (C_ACCENT.g - C_BG.g) * m + n * 4.0;
+      float bb = C_BG.b + (C_ACCENT.b - C_BG.b) * m + n * 8.0;
+      sprite.drawPixel(cx + x, cy + y,
+        tft.color565(constrain(rr, 0.0f, 255.0f), constrain(gg, 0.0f, 255.0f), constrain(bb, 0.0f, 255.0f)));
+    }
   }
 }
 
@@ -897,7 +923,7 @@ void renderIdle() {
 
 // Pausen som pågår: märket och dess gloria, inget annat. Locket är stängt.
 void drawActiveMark(float k) {
-  drawHalo(CENTER_X, CENTER_Y, 62, k);
+  drawHalo(CENTER_X, CENTER_Y, 78, k);
   drawPauseMark(CENTER_X, CENTER_Y, 64, fadeIn(C_ACCENT, k));
 }
 
@@ -1390,6 +1416,7 @@ void setup() {
     Serial.println("Ingen PSRAM: skärmen ritas i 8 bitar. Slå på Verktyg -> PSRAM -> OPI PSRAM.");
   }
   sprite.setColorDepth(hasPsram ? 16 : 8);
+  deepColor = hasPsram;
   sprite.setAttribute(PSRAM_ENABLE, hasPsram);
   spriteOK = (sprite.createSprite(SCREEN_W, SCREEN_H) != nullptr);
   if (!spriteOK) {

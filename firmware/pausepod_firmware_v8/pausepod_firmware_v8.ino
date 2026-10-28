@@ -1239,9 +1239,19 @@ void setup() {
 
   // 320x170 i 16 bitar = 108 kB. I PSRAM om den finns — internminnet behövs
   // till Bluetooth, WiFi och TLS samtidigt.
-  Serial.printf("PSRAM: %s (%u byte)\n", psramFound() ? "ja" : "NEJ", ESP.getPsramSize());
-  sprite.setColorDepth(16);
-  sprite.setAttribute(PSRAM_ENABLE, true);
+  //
+  // Utan PSRAM (Verktyg → PSRAM avstängt) tog bufferten 108 kB av
+  // internminnet, och efter Bluetooth och WiFi var bara ~19 kB kvar: varje
+  // HTTPS-anrop föll med -1 och skärmen stod på NO CONNECTION. Då ritas
+  // skärmen i 8 bitar i stället (54 kB). Färgerna blir lite grövre, men
+  // lådan kommer ut på nätet.
+  bool hasPsram = psramFound();
+  Serial.printf("PSRAM: %s (%u byte)\n", hasPsram ? "ja" : "NEJ", ESP.getPsramSize());
+  if (!hasPsram) {
+    Serial.println("Ingen PSRAM: skärmen ritas i 8 bitar. Slå på Verktyg -> PSRAM -> OPI PSRAM.");
+  }
+  sprite.setColorDepth(hasPsram ? 16 : 8);
+  sprite.setAttribute(PSRAM_ENABLE, hasPsram);
   spriteOK = (sprite.createSprite(SCREEN_W, SCREEN_H) != nullptr);
   if (!spriteOK) {
     Serial.println("KRITISKT: sprite kunde inte allokeras");
@@ -1258,7 +1268,9 @@ void setup() {
   startReader();
 
   netMutex = xSemaphoreCreateMutex();
-  xTaskCreatePinnedToCore(netTask, "net", 16384, nullptr, 1, nullptr, 0);
+  // 10 kB räcker för TLS (NFC-koden körde samma anrop i loopTasks 8 kB), och
+  // stacken tas ur internminnet — samma minne som HTTPS-anropet behöver.
+  xTaskCreatePinnedToCore(netTask, "net", 10240, nullptr, 1, nullptr, 0);
 
   BLEDevice::init("PausePod");
   BLEServer* pServer = BLEDevice::createServer();
@@ -1279,8 +1291,9 @@ void setup() {
   lastLidRaw = lidClosed;
   setPhase(IDLE);
 
-  Serial.printf("Pause Pod v8 redo. låda=%s ble_id=%s seq=%lu wifi-kö=%d heap=%u\n",
-                BOX_ID, boxIdBle.c_str(), (unsigned long)nextSeq, wifiQueueCount, ESP.getFreeHeap());
+  Serial.printf("Pause Pod v8 redo. låda=%s ble_id=%s seq=%lu wifi-kö=%d heap=%u största block=%u\n",
+                BOX_ID, boxIdBle.c_str(), (unsigned long)nextSeq, wifiQueueCount,
+                ESP.getFreeHeap(), ESP.getMaxAllocHeap());
 }
 
 void loop() {

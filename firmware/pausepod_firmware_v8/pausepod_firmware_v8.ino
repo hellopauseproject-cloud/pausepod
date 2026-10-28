@@ -554,7 +554,8 @@ TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite sprite = TFT_eSprite(&tft);
 bool spriteOK = false;
 
-struct Rgb { uint8_t r, g, b; };
+// Rgb bor i pausepod_types.h: Arduino lägger funktionsdeklarationer överst i
+// filen, före allt annat, så en typ i en funktions signatur måste finnas där.
 
 // Ur designsystemet (tokens.json i PausePod-systemet)
 const Rgb C_BG     = {0x0b, 0x16, 0x30};  // app-night-bg
@@ -954,7 +955,7 @@ void renderAwaitingLid() {
   sprite.setTextDatum(MC_DATUM);
   sprite.setFreeFont(&FreeSansBold24pt7b);
   drawHeavy(phonePlaced ? "LID DOWN." : "PHONE IN.", CENTER_X, 82, INK);
-  drawBody(phonePlaced ? "The clock starts then." : "Screen facing down.", CENTER_X, 132, INK_2);
+  drawBody(phonePlaced ? "Clock starts then." : "Tag on the mark.", CENTER_X, 132, INK_2);
   sprite.pushSprite(0, 0);
 }
 

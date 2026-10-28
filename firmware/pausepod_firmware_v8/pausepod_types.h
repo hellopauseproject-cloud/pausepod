@@ -31,3 +31,8 @@ struct SessionRecord {
   unsigned long endedAtMillis;
   uint8_t       completed;
 };
+
+// En färg som tre byte, för toningar på skärmen. Bor här och inte i .ino:
+// Arduino lägger funktionsdeklarationerna överst i sketchen, före en struct
+// som definierats längre ner.
+struct Rgb { uint8_t r, g, b; };

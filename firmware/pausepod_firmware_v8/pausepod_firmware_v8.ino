@@ -558,9 +558,12 @@ bool spriteOK = false;
 // filen, före allt annat, så en typ i en funktions signatur måste finnas där.
 
 // Ur designsystemet (tokens.json i PausePod-systemet)
-const Rgb C_BG     = {0x0b, 0x16, 0x30};  // app-night-bg
-const Rgb C_SURF   = {0x16, 0x24, 0x4a};  // app-night-surface
-const Rgb C_LINE   = {0x1d, 0x2d, 0x58};  // app-night-surface-alt: spår, tomma staplar
+// Botten, ytan och spåren är mörkare än appens night-bg (#0b1630): på lådans
+// IPS-skärm lyste den marinblå som intensivt blå. Nästan svart med en aning
+// blått ger märket och glorian något att lysa mot.
+const Rgb C_BG     = {0x03, 0x06, 0x0e};  // nästan svart, en aning blått
+const Rgb C_SURF   = {0x0a, 0x11, 0x24};  // yta i pillerna
+const Rgb C_LINE   = {0x16, 0x22, 0x44};  // spår, tomma staplar, ringar
 const Rgb C_HUE    = {0x8c, 0xbc, 0xff};  // app-night-hue: etiketter, mätare
 const Rgb C_ACCENT = {0x2e, 0x86, 0xde};  // app-accent: pausmärket
 const Rgb C_INK    = {0xff, 0xf4, 0xec};  // gräddvitt bläck, rgba(255,244,236,a)
@@ -674,6 +677,7 @@ void drawHalo(int cx, int cy, int r, float k) {
       float t = 1.0 - sqrtf(d2) / r;      // 1 i mitten, 0 vid kanten
       float a = t * t * (3.0 - 2.0 * t);  // smoothstep: mjuk ut mot kanten
       float m = a * PEAK * k;
+      if (m < 0.003) continue;   // ytterkanten: lämna botten orörd
       // Bayer-dither: skärmen har 32 nivåer rött/blått och 64 grönt, och i
       // de mörka tonerna syns stegen som ringar. Ett fint mönster av ±ett
       // halvt steg får ögat att se mellantonerna i stället.
@@ -682,7 +686,9 @@ void drawHalo(int cx, int cy, int r, float k) {
       float gg = C_BG.g + (C_ACCENT.g - C_BG.g) * m + n * 4.0;
       float bb = C_BG.b + (C_ACCENT.b - C_BG.b) * m + n * 8.0;
       sprite.drawPixel(cx + x, cy + y,
-        tft.color565(constrain(rr, 0.0f, 255.0f), constrain(gg, 0.0f, 255.0f), constrain(bb, 0.0f, 255.0f)));
+        // Aldrig mörkare än botten: annars blir glorians ytterkant en mörk ring.
+        tft.color565(constrain(rr, (float)C_BG.r, 255.0f), constrain(gg, (float)C_BG.g, 255.0f),
+                     constrain(bb, (float)C_BG.b, 255.0f)));
     }
   }
 }

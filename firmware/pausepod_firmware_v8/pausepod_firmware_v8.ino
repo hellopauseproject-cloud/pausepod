@@ -348,16 +348,28 @@ unsigned long tagLastSeenMs = 0;
 unsigned long lastTagPollMs = 0;
 unsigned long lastReaderCheckMs = 0;
 
-void startReader() {
+// Utan standardargument: Arduino flyttar funktionsdeklarationerna överst och
+// klarar inte ett standardvärde i dem.
+void startReaderQuiet() {
   rfid.PCD_Init();
   delay(50);
   rfid.PCD_SetAntennaGain(rfid.RxGain_max);   // kopior (0x88) läser bättre med full förstärkning
+}
+
+void startReader() {
+  startReaderQuiet();
   rfid.PCD_DumpVersionToSerial();
 }
 
+// Läsaren kan svara rätt på sin version och ändå ha tappat antennen eller
+// förstärkningen — ett glapp på SPI kan skriva fel i ett register. Då läser
+// den ingen tagg alls och ser ändå frisk ut. Därför kollas alla tre.
 bool readerOk() {
   byte v = rfid.PCD_ReadRegister(MFRC522::VersionReg);
-  return v == 0x88 || v == 0x90 || v == 0x91 || v == 0x92 || v == 0x12 || v == 0xB2;
+  if (!(v == 0x88 || v == 0x90 || v == 0x91 || v == 0x92 || v == 0x12 || v == 0xB2)) return false;
+  if ((rfid.PCD_ReadRegister(MFRC522::TxControlReg) & 0x03) != 0x03) return false;   // antennen av
+  if ((rfid.PCD_ReadRegister(MFRC522::RFCfgReg) & 0x70) != rfid.RxGain_max) return false;
+  return true;
 }
 
 // Läser taggen om den ligger på läsaren, även om den lästs nyss (WakeupA
@@ -1282,10 +1294,17 @@ void pollTag() {
   if (now - lastReaderCheckMs > READER_CHECK_MS) {
     lastReaderCheckMs = now;
     if (!readerOk()) {
-      Serial.printf("Läsaren svarar inte rätt (0x%02X), startar om den\n",
-                    rfid.PCD_ReadRegister(MFRC522::VersionReg));
+      Serial.printf("Läsaren svarar inte rätt (version 0x%02X, antenn 0x%02X), startar om den\n",
+                    rfid.PCD_ReadRegister(MFRC522::VersionReg),
+                    rfid.PCD_ReadRegister(MFRC522::TxControlReg));
       startReader();
       tagLastSeenMs = millis();   // omstarten tappar taggen en stund
+    } else if (!tagPresent) {
+      // Ingen tagg på läsaren: starta om den tyst ändå. Läsaren kan fastna i
+      // ett läge där inga register ser fel ut men ingen tagg läses — en
+      // omstart löser det, och utan tagg finns inget att tappa. RST-sladden
+      // till GPIO 16 gör samma sak hårdare om den sitter i.
+      startReaderQuiet();
     }
   }
 

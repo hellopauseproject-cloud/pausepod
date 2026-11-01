@@ -601,29 +601,6 @@ String htmlEscape(const String& in) {
   return out;
 }
 
-// Samma uttryck som joinpausepod.com: marinblått, ljusblått, tjocka versaler.
-const char PORTAL_HEAD[] PROGMEM = R"HTML(<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>PausePod WiFi</title>
-<style>
-body{margin:0;background:#0a1330;color:#eef3ff;font:16px/1.45 system-ui,-apple-system,Arial,sans-serif;padding:28px 20px}
-.w{max-width:420px;margin:0 auto}
-.k{color:#9ccbff;font:900 13px Arial Black,Arial,sans-serif;letter-spacing:.08em;text-transform:uppercase;margin:0 0 6px}
-h1{font:900 30px/1.05 "Arial Black",Arial,sans-serif;text-transform:uppercase;letter-spacing:-.01em;margin:0 0 18px}
-p{color:#b3c1de;margin:0 0 18px}
-label{display:block;font-weight:700;margin:16px 0 6px}
-select,input{width:100%;box-sizing:border-box;background:#111c3f;color:#eef3ff;border:2px solid #1c2b58;border-radius:12px;padding:13px 14px;font-size:16px}
-button{width:100%;margin-top:22px;background:#9ccbff;color:#0a1330;border:0;border-radius:999px;padding:15px;font:900 15px "Arial Black",Arial,sans-serif;text-transform:uppercase;letter-spacing:.04em}
-.small{font-size:14px;color:#b3c1de}
-.link{background:none;color:#9ccbff;font:700 14px system-ui,Arial;text-transform:none;padding:8px;margin-top:28px}
-</style></head><body><div class="w">)HTML";
-
-void sendPortalPage(const String& body) {
-  String page = FPSTR(PORTAL_HEAD);
-  page += body;
-  page += "</div></body></html>";
-  portalServer.send(200, "text/html; charset=utf-8", page);
-}
-
 // Näten i menyn söks fram INNAN inställningsnätet öppnas och sparas här.
 // En sökning medan mobilen är ansluten byter radiokanal i flera sekunder, och
 // sidan hann aldrig fram — mobilen visade en vit sida.
@@ -634,7 +611,7 @@ int    portalSsidCount = 0;
 void scanForPortal() {
   portalSsidCount = 0;
   int found = WiFi.scanNetworks();
-  // Starkast först
+  // Starkast först, varje namn en gång
   for (int pass = 0; pass < found && portalSsidCount < PORTAL_SSIDS_MAX; pass++) {
     int best = -1;
     for (int i = 0; i < found; i++) {
@@ -652,20 +629,88 @@ void scanForPortal() {
   Serial.printf("WiFi: %d nät till inställningssidan\n", portalSsidCount);
 }
 
-void handlePortalRoot() {
-  String opts;
-  for (int i = 0; i < portalSsidCount; i++) opts += "<option>" + htmlEscape(portalSsids[i]) + "</option>";
+// Sidan följer PausePod-designsystemet (joinpausepod.com): marinblå botten
+// (bg #0a1330), en upphöjd panel (panel #111c3f) med 2 px ring-line (#1c2b58),
+// ljusblått som enda handlingsfärg (accent #9ccbff, marinblå text ovanpå),
+// pausmärket och ordmärket överst, rubrik i tjocka versaler, piller-knapp,
+// fält med radius-field. Ingen emoji, inga utropstecken. Hela sidan bor i
+// lådan och laddar ingenting utifrån — mobilen har ju inget internet här.
+const char PORTAL_HEAD[] PROGMEM = R"HTML(<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>PausePod WiFi</title>
+<style>
+:root{--bg:#0a1330;--panel:#111c3f;--line:#1c2b58;--fg:#eef3ff;--muted:#b3c1de;--accent:#9ccbff;--honey:#f0b978;
+--display:"Arial Black","Arial Bold",Arial,"Helvetica Neue",Helvetica,sans-serif;--body:Arial,"Helvetica Neue",Helvetica,sans-serif}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg);font:400 17px/27px var(--body);-webkit-text-size-adjust:100%}
+.w{max-width:26rem;margin:0 auto;padding:28px 16px 40px}
+.brand{display:flex;align-items:center;gap:12px;margin-bottom:44px}
+.mark{display:flex;gap:4px}.mark i{display:block;width:6px;height:22px;border-radius:99px;background:var(--accent)}
+.brand b{font:900 14px/14px var(--display);letter-spacing:.24em}
+.k{font:900 12px/12px var(--display);letter-spacing:.2em;text-transform:uppercase;color:var(--accent);margin:0 0 14px}
+h1{font:900 36px/36px var(--display);letter-spacing:-.02em;text-transform:uppercase;margin:0 0 16px}
+p{margin:0 0 28px;color:var(--muted)}
+.panel{background:var(--panel);border-radius:1.6rem;box-shadow:0 0 0 2px var(--line);padding:22px 18px 24px}
+label{display:block;font:700 15px/24px var(--body);margin:0 0 8px}
+.f{margin-bottom:18px}
+select,input{width:100%;height:3.4rem;padding:0 16px;background:var(--bg);color:var(--fg);border:0;border-radius:.95rem;
+box-shadow:inset 0 0 0 2px var(--line);font:400 17px var(--body);-webkit-appearance:none;appearance:none}
+select{background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);
+background-position:calc(100% - 22px) 50%,calc(100% - 16px) 50%;background-size:6px 6px;background-repeat:no-repeat;padding-right:40px}
+.pw{position:relative}.pw input{padding-right:76px}
+.pw button{position:absolute;right:6px;top:6px;height:calc(3.4rem - 12px);padding:0 14px;border:0;border-radius:99px;background:transparent;
+color:var(--accent);font:900 12px var(--display);letter-spacing:.08em;text-transform:uppercase}
+.go{display:block;width:100%;height:3.4rem;margin-top:24px;border:0;border-radius:99px;background:var(--accent);color:var(--bg);
+font:900 14px/14px var(--display);letter-spacing:.08em;text-transform:uppercase}
+.note{margin:0 0 20px;color:var(--honey);font:700 15px/24px var(--body)}
+.small{font-size:15px;line-height:24px;color:var(--muted);margin:0}
+.quiet{display:block;margin:28px auto 0;padding:10px 16px;min-height:44px;border:0;background:none;color:var(--muted);
+font:400 15px var(--body);text-decoration:underline;text-underline-offset:3px}
+.hide{display:none}
+:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
+</style></head><body><div class="w">
+<div class="brand"><span class="mark"><i></i><i></i></span><b>PAUSEPOD</b></div>
+)HTML";
 
+const char PORTAL_SCRIPT[] PROGMEM = R"HTML(<script>
+var s=document.getElementById('ssid'),o=document.getElementById('other');
+function t(){if(s)o.classList.toggle('hide',s.value!=='');}
+if(s){s.onchange=t;t();}
+var b=document.getElementById('show'),p=document.getElementById('pass');
+b.onclick=function(){var h=p.type==='password';p.type=h?'text':'password';b.textContent=h?'Hide':'Show';};
+</script>)HTML";
+
+void sendPortalPage(const String& body) {
+  String page = FPSTR(PORTAL_HEAD);
+  page += body;
+  page += "</div></body></html>";
+  portalServer.send(200, "text/html; charset=utf-8", page);
+}
+
+void handlePortalRoot() {
   String body;
-  body += "<p class=\"k\">PausePod</p><h1>Connect<br>to WiFi</h1>";
-  if (wifiSetupResult == 3) body += "<p>That didn't work. Check the password and try again.</p>";
-  else body += "<p>The box needs WiFi to save your pauses. 2.4 GHz networks only.</p>";
-  body += "<form method=\"post\" action=\"/save\">";
-  body += "<label>Network</label><select name=\"ssid\">" + opts + "</select>";
-  body += "<label>Or type the name</label><input name=\"ssid2\" autocapitalize=\"none\" autocorrect=\"off\">";
-  body += "<label>Password</label><input name=\"pass\" type=\"password\" autocapitalize=\"none\" autocorrect=\"off\">";
-  body += "<button type=\"submit\">Connect</button></form>";
-  body += "<form method=\"post\" action=\"/forget\"><button class=\"link\" type=\"submit\">Forget saved networks</button></form>";
+  body += "<p class=\"k\">WiFi setup</p><h1>Connect<br>your box</h1>";
+  body += "<p>Choose the WiFi at home. The box saves your pauses through it.</p>";
+  body += "<form class=\"panel\" method=\"post\" action=\"/save\">";
+  if (wifiSetupResult == 3) body += "<p class=\"note\">That didn't work. Check the password and try again.</p>";
+
+  if (portalSsidCount > 0) {
+    body += "<div class=\"f\"><label for=\"ssid\">Network</label><select id=\"ssid\" name=\"ssid\">";
+    for (int i = 0; i < portalSsidCount; i++) body += "<option>" + htmlEscape(portalSsids[i]) + "</option>";
+    body += "<option value=\"\">Other network</option></select></div>";
+    body += "<div class=\"f hide\" id=\"other\">";
+  } else {
+    body += "<div class=\"f\" id=\"other\">";
+  }
+  body += "<label for=\"ssid2\">Network name</label>"
+          "<input id=\"ssid2\" name=\"ssid2\" autocapitalize=\"none\" autocorrect=\"off\" spellcheck=\"false\"></div>";
+
+  body += "<div class=\"f\"><label for=\"pass\">Password</label><div class=\"pw\">"
+          "<input id=\"pass\" name=\"pass\" type=\"password\" autocapitalize=\"none\" autocorrect=\"off\" spellcheck=\"false\">"
+          "<button type=\"button\" id=\"show\">Show</button></div></div>";
+  body += "<p class=\"small\">2.4 GHz only. If the router has a 5G network, pick the other one.</p>";
+  body += "<button class=\"go\" type=\"submit\">Connect</button></form>";
+  body += "<form method=\"post\" action=\"/forget\"><button class=\"quiet\" type=\"submit\">Forget saved networks</button></form>";
+  body += FPSTR(PORTAL_SCRIPT);
   sendPortalPage(body);
 }
 
@@ -683,9 +728,12 @@ void handlePortalSave() {
   Serial.printf("WiFi: nytt nät från sidan: %s\n", ssid.c_str());
   wifiSetupResult = 1;
   connectRequested = true;
-  sendPortalPage("<p class=\"k\">PausePod</p><h1>Connecting</h1>"
-                 "<p>Look at the box. It says CONNECTED when it's done, and this network closes.</p>"
-                 "<p class=\"small\">If the box shows this page again, the password was wrong.</p>");
+  String body;
+  body += "<p class=\"k\">WiFi setup</p><h1>Connecting</h1>";
+  body += "<p>Look at the box. It says CONNECTED when it's done, and this page closes.</p>";
+  body += "<div class=\"panel\"><p class=\"small\">Network: <b style=\"color:var(--fg)\">" + htmlEscape(ssid) + "</b></p></div>";
+  body += "<p class=\"small\" style=\"margin-top:20px\">If the box shows the setup code again, the password was wrong. Scan it and try once more.</p>";
+  sendPortalPage(body);
 }
 
 void handlePortalForget() {

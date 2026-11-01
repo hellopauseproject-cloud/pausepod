@@ -624,18 +624,37 @@ void sendPortalPage(const String& body) {
   portalServer.send(200, "text/html; charset=utf-8", page);
 }
 
-void handlePortalRoot() {
-  // Sökningen tar ett par sekunder; mobilen väntar så länge.
+// Näten i menyn söks fram INNAN inställningsnätet öppnas och sparas här.
+// En sökning medan mobilen är ansluten byter radiokanal i flera sekunder, och
+// sidan hann aldrig fram — mobilen visade en vit sida.
+const int PORTAL_SSIDS_MAX = 15;
+String portalSsids[PORTAL_SSIDS_MAX];
+int    portalSsidCount = 0;
+
+void scanForPortal() {
+  portalSsidCount = 0;
   int found = WiFi.scanNetworks();
-  String opts;
-  String seen = "|";
-  for (int i = 0; i < found; i++) {
-    String ssid = WiFi.SSID(i);
-    if (ssid.length() == 0 || seen.indexOf("|" + ssid + "|") >= 0) continue;
-    seen += ssid + "|";
-    opts += "<option>" + htmlEscape(ssid) + "</option>";
+  // Starkast först
+  for (int pass = 0; pass < found && portalSsidCount < PORTAL_SSIDS_MAX; pass++) {
+    int best = -1;
+    for (int i = 0; i < found; i++) {
+      String ssid = WiFi.SSID(i);
+      if (ssid.length() == 0) continue;
+      bool taken = false;
+      for (int j = 0; j < portalSsidCount; j++) if (portalSsids[j] == ssid) taken = true;
+      if (taken) continue;
+      if (best < 0 || WiFi.RSSI(i) > WiFi.RSSI(best)) best = i;
+    }
+    if (best < 0) break;
+    portalSsids[portalSsidCount++] = WiFi.SSID(best);
   }
   WiFi.scanDelete();
+  Serial.printf("WiFi: %d nät till inställningssidan\n", portalSsidCount);
+}
+
+void handlePortalRoot() {
+  String opts;
+  for (int i = 0; i < portalSsidCount; i++) opts += "<option>" + htmlEscape(portalSsids[i]) + "</option>";
 
   String body;
   body += "<p class=\"k\">PausePod</p><h1>Connect<br>to WiFi</h1>";
@@ -686,6 +705,8 @@ void handlePortalOther() {
 bool portalRoutesAdded = false;
 
 void startPortal() {
+  WiFi.mode(WIFI_STA);
+  scanForPortal();   // innan någon mobil hunnit ansluta
   WiFi.mode(WIFI_AP_STA);
   // DNS måste anges uttryckligen: utan det delar ESP32 inte ut någon DNS till
   // mobilen, mobilens "finns det internet?"-koll når aldrig lådan, och mobilen

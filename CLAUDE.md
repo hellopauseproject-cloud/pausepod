@@ -728,6 +728,14 @@ skriver. Tre saker att veta:
   kategorins id, inte dess plats i listan, så att den inte byter färg när
   någon ändrar sina val. En otaggad paus står i rummets blå med pausens
   symbol. Chippen under kortet är också färgade (`colorful`).
+- **En lådpaus (`with_pod`) är ett vanligt kort med lådan i hörnet**
+  ([components/pod-box-icon.tsx](components/pod-box-icon.tsx)): en liten
+  ritad låda i ljus ek med displayens två blå streck, överst i kortets högra
+  kolumn. Den ersatte den lilla ⏸-markeringen. Tre starkare varianter
+  prövades och valdes bort på begäran: hela kortet i ek med eget brunt
+  bläck, en ton av ek över kortet, och längden i en svart display i full
+  storlek — alla var för starka bredvid resten av listan. Lådan är svg och
+  inte renderingen som bild, eftersom bilden har en egen mörk botten.
 - **Ett tryck vänder kortet** ([components/flip-card.tsx](components/flip-card.tsx)),
   och baksidan ([lib/pauseFacts.ts](lib/pauseFacts.ts)) har tre rader: en
   rekordrad som bara står när den är sann (längst hittills, längst den

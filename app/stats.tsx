@@ -19,6 +19,7 @@ import { intentionTone, PauseTagChips } from '../components/pause-tag-chips';
 import { FlipCard } from '../components/flip-card';
 import { contextLine, FactSession, pauseQuote, recordLine } from '../lib/pauseFacts';
 import { SleepSessionCard } from '../components/sleep-session-card';
+import { PodBoxIcon } from '../components/pod-box-icon';
 import { Cheerer, getCheersFor } from '../lib/pauseCheers';
 import { setPauseIntention } from '../lib/pauseTags';
 import { getNightProgress, getSleepNights } from '../lib/sleep';
@@ -556,6 +557,7 @@ function StatsScreen() {
               // blå med pausens symbol — den är inte grå, bara inte namngiven.
               const cat = findCat(s.intention);
               const tone = cat ? intentionTone(Palette, cat.id) : Palette.hue;
+              const isPod = s.withPod === true;
               const cardBorder = alpha(tone, Palette.mode === 'dark' ? 0.3 : 0.25);
               return (
               <View style={styles.sessionSlot}>
@@ -565,7 +567,7 @@ function StatsScreen() {
                   setFlippedId(flippedId === s.id ? null : s.id);
                   if (editingTagId === s.id) setEditingTagId(null);
                 }}
-                accessibilityLabel={`${fmtDur(s.durationSecs)} pause${cat ? `, ${cat.label.toLowerCase()}` : ''}. ${s.startedAt ? fmtDate(s.startedAt) : ''}`}
+                accessibilityLabel={`${fmtDur(s.durationSecs)} pause${isPod ? ' in the Pause Pod' : ''}${cat ? `, ${cat.label.toLowerCase()}` : ''}. ${s.startedAt ? fmtDate(s.startedAt) : ''}`}
                 backStyle={[styles.sessionBack, { borderColor: cardBorder }]}
                 backTint={alpha(tone, Palette.mode === 'dark' ? 0.16 : 0.11)}
                 back={<PauseCardBack s={s} cat={cat} tone={tone} all={factSessions} quoteIndex={quoteIndex[s.id] ?? 0} styles={styles} />}
@@ -583,6 +585,11 @@ function StatsScreen() {
                     <Text style={styles.sessionDate}>{s.startedAt ? fmtDate(s.startedAt) : '—'}</Text>
                   </View>
                   <View style={styles.sessionCardRight}>
+                    {/* Bara en lådpaus får en markering: lådan själv i
+                        hörnet. "Utan låda" visades förr som en egen ikon på
+                        varje paus — men nästan alla pauser är utan låda, så
+                        den sa ingenting. */}
+                    {isPod && <PodBoxIcon />}
                     {s.cheers.length > 0 && <CheerFaces cheers={s.cheers} styles={styles} Palette={Palette} />}
                     {s.msg && (
                       <TouchableOpacity style={styles.mailBtn} onPress={() => openMsg(s.msg!)} activeOpacity={0.65}>
@@ -621,14 +628,6 @@ function StatsScreen() {
                       {s.intention ? fmtIntention(s.intention, categoryMap) : '+ Add tag'}
                     </Text>
                   </TouchableOpacity>
-                  {/* Bara en lådpaus får en markering. "Utan låda" visades
-                      förr som en egen ikon på varje paus — men nästan alla
-                      pauser är utan låda, så den sa ingenting och togs bort. */}
-                  {s.withPod === true && (
-                    <View style={styles.tagPod}>
-                      <FontAwesome name="pause" size={9} color={alpha(Palette.accentSoft, 0.7)} />
-                    </View>
-                  )}
                 </View>
                 {editingTagId === s.id && (
                   <View style={styles.tagEditor}>
@@ -803,12 +802,6 @@ const makeStyles = (Palette: AppPalette, Night: AppPalette) => StyleSheet.create
     borderWidth: 1, borderColor: Palette.accentSoftTint,
   },
   tagFriendText: { fontSize: 12, color: Palette.accentSoft, fontWeight: '600' },
-  tagPod: {
-    width: 26, height: 26, borderRadius: 13,
-    backgroundColor: alpha(Palette.accentSoft, 0.08),
-    borderWidth: 1, borderColor: alpha(Palette.accentSoft, 0.25),
-    alignItems: 'center', justifyContent: 'center',
-  },
   tagIntention: {
     backgroundColor: alpha(Palette.communitySoft, 0.08), borderRadius: 20,
     paddingHorizontal: 10, paddingVertical: 4,

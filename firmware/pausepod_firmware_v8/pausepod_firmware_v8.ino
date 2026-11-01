@@ -446,6 +446,10 @@ volatile bool wifiUp = false;
 
 const int  WIFI_SAVED_MAX = 5;
 const unsigned long WIFI_RETRY_MS     = 20000;  // nere: leta igen så här ofta
+// Med inställningsnätet uppe letar lådan mycket mer sällan: sökningen byter
+// radiokanal ett par sekunder, och en mobil som ansluter just då kastas ut
+// ("anslutningen misslyckades"). Så länge en mobil är ansluten letar den inte alls.
+const unsigned long PORTAL_RETRY_MS   = 90000;
 const unsigned long PORTAL_LINGER_MS  = 20000;  // uppkopplad: låt sidan hinna svara
 const unsigned long WIFI_OK_SHOW_MS   = 5000;   // "CONNECTED" på skärmen
 
@@ -737,7 +741,8 @@ bool phoneOnPortal() {
 
 // POST till en edge-funktion. Returnerar HTTP-koden (0 = inget svar).
 int postToFunction(const char* fn, const String& body, String& response) {
-  if (WiFi.status() != WL_CONNECTED && phoneOnPortal()) return 0;
+  // Med inställningsnätet uppe letar bara tasken efter WiFi, i sin egen takt.
+  if (WiFi.status() != WL_CONNECTED && portalActive) return 0;
   if (!ensureWifi()) return 0;
   WiFiClientSecure client;
   client.setInsecure();   // PROTOTYP: certifikatet kontrolleras inte. setCACert före lansering.
@@ -825,7 +830,8 @@ void netTask(void*) {
     } else {
       if (WiFi.status() != WL_CONNECTED) wifiUp = false;
       bool requested = connectRequested;
-      if (requested || (!wifiUp && !phoneOnPortal() && millis() - lastWifiTry > WIFI_RETRY_MS)) {
+      unsigned long retryMs = portalActive ? PORTAL_RETRY_MS : WIFI_RETRY_MS;
+      if (requested || (!wifiUp && !phoneOnPortal() && millis() - lastWifiTry > retryMs)) {
         connectRequested = false;
         lastWifiTry = millis();
         if (requested) WiFi.disconnect();   // byt till det nya nätet även om ett gammalt nås

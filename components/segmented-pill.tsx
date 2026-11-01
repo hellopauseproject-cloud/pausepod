@@ -41,9 +41,11 @@ type Props<K extends string> = {
   onChange: (key: K) => void;
   /** Kapselns hela bredd. */
   width: number;
+  /** Lägen som syns men inte går att välja — nedtonade (Hem efter midnatt). */
+  disabled?: K[];
 };
 
-function SegmentedPillInner<K extends string>({ options, value, onChange, width }: Props<K>) {
+function SegmentedPillInner<K extends string>({ options, value, onChange, width, disabled }: Props<K>) {
   const Palette = usePalette();
   const reduceMotion = useReducedMotion();
   const half = (width - PAD * 2) / 2;
@@ -70,18 +72,20 @@ function SegmentedPillInner<K extends string>({ options, value, onChange, width 
       />
       {options.map(o => {
         const on = o.key === value;
+        const off = !!disabled?.includes(o.key) && !on;
         return (
           <Pressable
             key={o.key}
             style={[styles.segment, { width: half }]}
-            onPress={() => { if (!on) onChange(o.key); }}
+            onPress={() => { if (!on && !off) onChange(o.key); }}
+            disabled={off}
             hitSlop={{ top: 6, bottom: 6 }}
             accessibilityRole="tab"
-            accessibilityState={{ selected: on }}
+            accessibilityState={{ selected: on, disabled: off }}
             accessibilityLabel={o.label}
           >
             <Text
-              style={[styles.label, { color: on ? onThumb : Palette.hue }]}
+              style={[styles.label, { color: on ? onThumb : off ? Palette.textDisabled : Palette.hue }]}
               numberOfLines={1}
             >
               {o.label.toUpperCase()}

@@ -35,7 +35,9 @@ import { roomShell, ScreenBackground } from '../../components/screen-background'
 import { CircleLevelBadge } from '../../components/circle-level-badge';import { circleLevelName } from '../../lib/circleLevels';
 import { FriendCircleBadge, getFriendCircleBadge } from '../../lib/circles';
 import { track } from '../../lib/analytics';
+import { isNightHours } from '../../lib/homeMode';
 import { enablePushNotifications } from '../../lib/notifications';
+import { startSleep } from '../../lib/sleep';
 import { supabase } from '../../lib/supabase';
 import { liveStoryFilter, storyTimeLeft, unopenedResponsesQuery } from '../../lib/supportStories';
 import type { PauseSession, Profile } from '../../types/database';
@@ -1271,6 +1273,9 @@ function FriendsScreen() {
   // värden kan ha slutat i sekunden mellan pollningen och trycket.
   const joinInvite = async (invite: IncomingPauseInvite) => {
     if (joiningInviteId) return;
+    // Efter midnatt blir det en natt i stället, och en natt är privat — den
+    // hänger inte på någons paus, så inbjudan besvaras inte (lib/homeMode.ts).
+    if (isNightHours()) { startSleep('push', 'night_hours'); return; }
     setJoiningInviteId(invite.id);
     try {
       const { sharedId, hostName } = await joinPauseInvite(invite.id);

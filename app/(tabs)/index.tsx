@@ -32,7 +32,7 @@ import {
 import { applyPendingDailyGoal, isIntroDeferred } from '../../lib/introPrefs';
 import { HOLD_TO_START_MS, SHOW_PAUSE_SETUP_VIEW, startPhonePause } from '../../lib/pauseFlow';
 import { PendingPauseTag, takePendingPauseTag } from '../../lib/pauseTags';
-import { chooseHomeMode, HomeMode, refreshHomeMode, useHomeMode } from '../../lib/homeMode';
+import { chooseHomeMode, HomeMode, isNightHours, refreshHomeMode, useHomeMode } from '../../lib/homeMode';
 import { startSleep } from '../../lib/sleep';
 import { NightMoon } from '../../components/night-moon';
 import { SegmentedPill } from '../../components/segmented-pill';
@@ -338,7 +338,15 @@ function HomeScreen() {
   // Läget följer klockan vid varje fokus, om inget eget val är färskt.
   const homeMode = useHomeMode();
   const isNight = homeMode === 'night';
-  useFocusEffect(useCallback(() => { refreshHomeMode(); }, []));
+  // Mellan midnatt och fem går det inte att välja dagen (lib/homeMode.ts).
+  // Läget prövas också en gång i minuten medan Hem har fokus, så att en
+  // skärm som står öppen över midnatt byter av sig själv.
+  const nightLocked = isNightHours();
+  useFocusEffect(useCallback(() => {
+    refreshHomeMode();
+    const id = setInterval(refreshHomeMode, 60_000);
+    return () => clearInterval(id);
+  }, []));
 
   // Den egna listan, för lappen. Arket hämtar själv när det öppnas och
   // skickar tillbaka varje ändring, så de två visar alltid samma lista.
@@ -713,8 +721,16 @@ function HomeScreen() {
         }}>
           {/* Dag eller natt. Ett val och inte en etikett — samma kapsel som
               Kretsens *This week / Today*. */}
+          {/* Efter midnatt finns inget val (lib/homeMode.ts `isNightHours`):
+              kapseln står kvar men har bara natten, så att sidan inte hoppar. */}
           <View style={styles.modePill}>
-            <SegmentedPill options={MODE_OPTIONS} value={homeMode} onChange={chooseHomeMode} width={MODE_PILL_W} />
+            <SegmentedPill
+              options={MODE_OPTIONS}
+              value={homeMode}
+              onChange={chooseHomeMode}
+              width={MODE_PILL_W}
+              disabled={nightLocked ? ['day'] : undefined}
+            />
           </View>
           {userName ? (
             <Text style={styles.eyebrow}>HI {userName.toUpperCase()}</Text>

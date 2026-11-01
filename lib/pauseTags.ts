@@ -71,7 +71,13 @@ const RECENT_MS = 15 * 60 * 1000;
 const RETRY_MS = 1200;
 
 async function findOnce(userId: string, durationSeconds: number): Promise<string | null> {
-  const since = new Date(Date.now() - RECENT_MS).toISOString();
+  // En dagpaus som blev en natt vid midnatt sparas med sluttid 23:59:59
+  // (app/pausing.tsx) och taggas först på morgonen — fönstret räcker därför
+  // alltid tillbaka till strax före senaste midnatt. Raden är ändå den
+  // senaste pausen: natten är en sömnrad och filtreras bort nedan.
+  const midnight = new Date();
+  midnight.setHours(0, 0, 0, 0);
+  const since = new Date(Math.min(Date.now() - RECENT_MS, midnight.getTime() - 60_000)).toISOString();
   const { data, error } = await supabase
     .from('pause_sessions')
     .select('id, duration_seconds')

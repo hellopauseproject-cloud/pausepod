@@ -24,7 +24,7 @@ import { supabase } from '../lib/supabase';
 import { closePauseInvites, finishPauseInvite } from '../lib/pauseInvites';
 import { clearStalePausingFlag, setPausingFlag } from '../lib/pausingFlag';
 import { flushOutbox } from '../lib/sessionOutbox';
-import { markNightEnded } from '../lib/homeMode';
+import { markNightEnded, nextMidnight } from '../lib/homeMode';
 import { saveSleepSession } from '../lib/sleep';
 import { tiltDegrees } from '../lib/tilt';
 import { clearSessionCheckpoint, findCategoryById, loadSessionCheckpoint, logPause } from './pauseLogger';
@@ -557,8 +557,34 @@ function InnerLayout() {
       // medan telefonen låg uppåtvänd. Saknas fälten är checkpointen från en
       // äldre version: då vet vi ingenting om längden och låter den falla
       // bort på minimigränsen nedan i stället för att hitta på en.
-      const endedAt = checkpoint.lastAliveAt ? new Date(checkpoint.lastAliveAt) : new Date(checkpoint.startedAt);
-      const duration = Math.max(0, Math.floor((checkpoint.elapsedMs ?? 0) / 1000));
+      let endedAt = checkpoint.lastAliveAt ? new Date(checkpoint.lastAliveAt) : new Date(checkpoint.startedAt);
+      let duration = Math.max(0, Math.floor((checkpoint.elapsedMs ?? 0) / 1000));
+
+      // Midnatt (lib/homeMode.ts): en dagpaus slutar en sekund före den. Blev
+      // den en natt (`nightStartAt`) sparas natten för sig, räknad som en
+      // natt räknas ovan — till nu om telefonen låg nedåt och still när appen
+      // lämnades, annars till sista pulsen. Passerade den midnatt utan att
+      // hinna bli en natt kapas den där, och tiden efter räknas inte alls.
+      const midnight = nextMidnight(new Date(checkpoint.startedAt).getTime());
+      if (checkpoint.nightStartAt) {
+        const nightStart = new Date(checkpoint.nightStartAt).getTime();
+        const lastAlive = endedAt.getTime();
+        const nightEnd = checkpoint.runningAtLeave ? Date.now() : lastAlive;
+        track('pause_night_recovered', { running_at_leave: !!checkpoint.runningAtLeave });
+        await saveSleepSession({
+          userId: user.id,
+          startedAt: new Date(nightStart),
+          endedAt: new Date(nightEnd),
+          durationSeconds: (nightEnd - nightStart) / 1000,
+          wakeCount: 0,
+          awakeSeconds: 0,
+        });
+        duration = Math.max(0, Math.floor((checkpoint.dayMs ?? 0) / 1000));
+        endedAt = new Date(midnight - 1000);
+      } else if (endedAt.getTime() >= midnight) {
+        duration = Math.max(0, duration - Math.floor((endedAt.getTime() - midnight) / 1000));
+        endedAt = new Date(midnight - 1000);
+      }
       const startedAt = new Date(endedAt.getTime() - duration * 1000);
 
       if (duration < 5) {

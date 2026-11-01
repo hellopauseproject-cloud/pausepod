@@ -35,6 +35,12 @@ export interface SessionCheckpoint {
    *  användaren vidare efter den sista pulsen, och återställningen räknar
    *  fram till att appen öppnades igen i stället för att stanna vid pulsen. */
   runningAtLeave?: boolean;
+  // ── En dagpaus som blivit en natt vid midnatt (app/pausing.tsx) ──
+  /** ISO — där natten började (midnatt, eller när telefonen lades ner efter
+   *  den). Dagdelen är då `dayMs`, och `elapsedMs` räknar båda. Saknas den
+   *  och pausen ändå passerade midnatt kapas den där vid återställningen. */
+  nightStartAt?: string;
+  dayMs?: number;
 }
 
 export const saveSessionCheckpoint = async (checkpoint: SessionCheckpoint): Promise<void> => {

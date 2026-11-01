@@ -1811,6 +1811,37 @@ Schemat bor i [supabase/sleep.sql](supabase/sleep.sql), klientsidan i
 - **En natt hör till kvällen den började**, med gränsen vid lokal middag
   (`sleep_night_of()`). En sömn som börjar 01:00 tisdag är alltså
   måndagsnatten.
+- **Efter midnatt finns ingen dagpaus** (`isNightHours()` i
+  [lib/homeMode.ts](lib/homeMode.ts), 00:00–05:00, samma femgräns som Hems
+  nattläge). Tre regler, beslutade i oktober 2026 som förutsättning för allt
+  som någon gång rankar pauser — annars mäter en topplista sömn:
+  - **SLEEP går att välja när som helst**, också före midnatt, och är då en
+    natt hela vägen. Oförändrat.
+  - **Mellan 00 och 05 startar varje väg in i en paus en natt i stället:**
+    Hem låses i nattläge (kapselns *Day* är nedtonad, och läget prövas varje
+    minut medan Hem har fokus), `startPhonePause`/`openPauseStart` startar
+    en natt, och *Join* på en pausinbjudan i Friends startar en natt utan att
+    besvara inbjudan — natten är privat. Händelsen `sleep_started` bär
+    `via: 'night_hours'` för dessa.
+  - **En dagpaus som går vid midnatt blir en natt där**
+    ([app/pausing.tsx](app/pausing.tsx), `midnightAtRef`). Tiden före
+    midnatt sparas som en paus med sluttid 23:59:59 (`dayEndMs`, så att den
+    hamnar på rätt dag — dagen räknas på `ended_at`); tiden efter blir en
+    sömnrad från midnatt (eller läggningen efter den) **till första lyftet**.
+    Inga uppvaknanden och ingen tjugominutersfrist: lyftet *är* slutet. Står
+    klockan frusen vid midnatt (telefonen uppe sedan före) blir det ingen
+    natt, pausen slutar som den stod. Skärmen säger *Sleeping...* och
+    "pausing now" släcks vid omvandlingen.
+  - Det upptäcks när JS kör, alltså vid nästa tick eller när appen kommer
+    fram. Hann lyftet registreras före kollen (JS sov genom natten) räknas
+    natten fram till lyftet ändå — utan den grenen hade hela natten sparats
+    som dag.
+  - **Krasch-återställningen gör samma delning** (`nightStartAt`/`dayMs` i
+    checkpointen), och en paus som passerat midnatt utan att hinna bli en
+    natt kapas vid midnatt.
+  - Taggningen efter pausen (`findOnce` i lib/pauseTags.ts) letar tillbaka
+    till strax före senaste midnatt, för dagdelen taggas först på morgonen.
+  - Lådans session och regulate berörs inte.
 - **Det finns inget nattmål, och det ska inte komma tillbaka utan ett nytt
   skäl.** Ett fanns en kort tid (`profiles.nightly_target_seconds`,
   `set_night_goal`, en ratt på 5–10 h) och togs bort. Appen kan inte få någon

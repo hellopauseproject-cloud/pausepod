@@ -25,6 +25,28 @@ const autoMode = (): HomeMode => {
   return h >= NIGHT_FROM_HOUR || h < NIGHT_UNTIL_HOUR ? 'night' : 'day';
 };
 
+/**
+ * **Mellan midnatt och `NIGHT_UNTIL_HOUR` (05) är det natt, utan val.** Före
+ * midnatt får man välja natt tidigt; efter midnatt går det inte att välja en
+ * dagpaus. Hem låses i nattläge, och varje väg in i en paus startar en natt i
+ * stället (`startPhonePause` i lib/pauseFlow.ts, *Join* i Friends). En
+ * dagpaus som fortfarande går vid midnatt blir en natt där — se
+ * `nextMidnight` och app/pausing.tsx.
+ *
+ * Skälet är att en paus över natten annars fyllde morgonens dagsring, och
+ * att allt som någon gång rankar pauser hade mätt sömn.
+ */
+export function isNightHours(at: Date = new Date()): boolean {
+  return at.getHours() < NIGHT_UNTIL_HOUR;
+}
+
+/** Nästa lokala midnatt efter `fromMs` — där en dagpaus blir en natt. */
+export function nextMidnight(fromMs: number): number {
+  const d = new Date(fromMs);
+  d.setHours(24, 0, 0, 0);
+  return d.getTime();
+}
+
 let mode: HomeMode = autoMode();
 let chosenAt = 0;
 const listeners = new Set<() => void>();
@@ -36,6 +58,7 @@ export function getHomeMode(): HomeMode {
 
 /** Ett val i kapseln — står sig i några timmar. */
 export function chooseHomeMode(next: HomeMode) {
+  if (next === 'day' && isNightHours()) return;
   chosenAt = Date.now();
   if (next === mode) return;
   mode = next;
@@ -44,8 +67,8 @@ export function chooseHomeMode(next: HomeMode) {
 
 /** Vid fokus på Hem: klockans läge, om inget eget val är färskt. */
 export function refreshHomeMode() {
-  if (Date.now() - chosenAt < MANUAL_HOLD_MS) return;
-  const next = autoMode();
+  // Efter midnatt gäller inget eget dagval — se `isNightHours`.
+  const next = isNightHours() ? 'night' : Date.now() - chosenAt < MANUAL_HOLD_MS ? mode : autoMode();
   if (next === mode) return;
   mode = next;
   emit();
@@ -57,6 +80,8 @@ export function refreshHomeMode() {
 // statistiken). Som ett eget val, så att ett nattval från i går kväll inte
 // står sig i fyra timmar till.
 export function markNightEnded() {
+  // Slutar natten före fem är det fortfarande natt — då står Hem kvar där.
+  if (isNightHours()) return;
   chooseHomeMode('day');
 }
 

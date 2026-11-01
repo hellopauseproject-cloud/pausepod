@@ -16,6 +16,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { RoomProvider, usePalette } from '../contexts/ThemeContext';
 import { track } from '../lib/analytics';
 import { recordPauseInCircle } from '../lib/circles';
+import { nextMidnight } from '../lib/homeMode';
 import { HOLD_TO_START_MS } from '../lib/pauseFlow';
 import {
   closePauseInvites, finishPauseInvite, newSharedId, sendPauseInvites, takePauseInviteSelection,
@@ -234,7 +235,35 @@ function PausingScreen() {
   // trycka själv.
   const activeSinceRef = useRef(Date.now());
 
+  // ── Midnatt (lib/homeMode.ts `isNightHours`) ──
+  // En dagpaus som fortfarande går vid midnatt blir en natt där. Ligger
+  // telefonen nedåt när midnatt passerat sparas dagdelen (tiden före) som en
+  // paus och resten blir en natt som slutar vid första lyftet — utan
+  // uppvaknanden, för lyftet ÄR slutet. Står klockan frusen vid midnatt
+  // (telefonen uppe) slutar pausen som en vanlig paus i stället.
+  //
+  // Det upptäcks när JS kör, alltså vid nästa tick eller när appen kommer
+  // fram — samma gräns som natten har, och den ger rätt tal ändå: dagdelen
+  // räknas bakåt från tidpunkten, och natten börjar vid midnatt eller vid
+  // läggningen efter den (`runStartRef`), det som är senast.
+  //
+  // Bara en vanlig lådlös paus. En natt är redan en natt, regulate har ett
+  // eget slut, och lådans session ägs av lådan.
+  const midnightAtRef = useRef<number | null>(
+    !isSleep && withPod !== 'true' && pauseType !== 'regulate' ? nextMidnight(Date.now()) : null,
+  );
+  const runStartRef = useRef<number | null>(null);
+  const nightRef = useRef<{ startMs: number; dayMs: number } | null>(null);
+  const nightEndRef = useRef<number | null>(null);
+  /** Dagradens sluttid: en sekund före midnatt om midnatt passerats, så att
+   *  dagdelen hamnar på dagen den hör till (dagen räknas på `ended_at`). */
+  const dayEndMs = () => {
+    const m = midnightAtRef.current;
+    return m !== null && Date.now() >= m ? m - 1000 : Date.now();
+  };
+
   const noteRested = (now: number) => {
+    runStartRef.current = now;
     if (!isSleep) return;
     if (firstRestAtRef.current === null) { firstRestAtRef.current = now; return; }
     if (liftedAtRef.current !== null) {
@@ -649,6 +678,13 @@ function PausingScreen() {
           awakeMs: awakeMsRef.current,
           runningAtLeave,
         }),
+        // En dagpaus som blivit en natt: återställningen sparar dagdelen och
+        // natten var för sig, och natten räknas som en natt (runningAtLeave).
+        ...(nightRef.current && {
+          nightStartAt: new Date(nightRef.current.startMs).toISOString(),
+          dayMs: nightRef.current.dayMs,
+          runningAtLeave,
+        }),
       });
     };
 
@@ -732,6 +768,49 @@ function PausingScreen() {
     if (Date.now() - since >= SLEEP_AUTO_END_MS) finishPause('auto');
   });
 
+  // ── Midnatt passerad: dagpausen blir en natt, eller slutar ──
+  // Körs vid varje render (klockan tickar varje sekund medan JS lever).
+  useEffect(() => {
+    const m = midnightAtRef.current;
+    if (m === null || nightRef.current || autoEndFiredRef.current) return;
+    if (!state.startedAt || state.phase === 'ended') return;
+    const now = Date.now();
+    if (now < m) return;
+    // Hur länge klockan gick efter midnatt. Antingen går den nu, eller så
+    // har JS sovit genom midnatt och lyftet hann registreras före den här
+    // kollen (telefonen togs upp på morgonen) — då gick den fram till lyftet,
+    // och natten är redan slut. Utan den andra grenen hade hela natten
+    // sparats som en dagpaus.
+    const runningNow = state.phase === 'active' && restingRef.current && hasRestedRef.current;
+    const liftedAfter = state.phase === 'respite' && hasRestedRef.current
+      && state.respiteStartedAt !== null && state.respiteStartedAt !== undefined && state.respiteStartedAt > m;
+    if (runningNow || liftedAfter) {
+      const until = runningNow ? now : state.respiteStartedAt!;
+      const startMs = Math.max(m, runStartRef.current ?? m);
+      const dayMs = Math.max(0, computeElapsedMs() - (until - startMs));
+      nightRef.current = { startMs, dayMs };
+      track('pause_became_night', { day_seconds: Math.round(dayMs / 1000) });
+      // "Pausing now" hör till dagen; natten är privat.
+      if (user?.id) setPausingFlag(user.id, false);
+      if (liftedAfter) {
+        nightEndRef.current = until;
+        finishPause('night', dayMs);
+      }
+      return;
+    }
+    // Uppe sedan före midnatt: ingen natt, pausen slutar som den stod.
+    finishPause('midnight');
+  });
+
+  // ── Natten (efter midnatt) slutar vid första lyftet ──
+  useEffect(() => {
+    const night = nightRef.current;
+    if (!night || autoEndFiredRef.current) return;
+    if (state.phase !== 'respite' || !state.respiteStartedAt) return;
+    nightEndRef.current = state.respiteStartedAt;
+    finishPause('night', night.dayMs);
+  }, [state.phase, state.respiteStartedAt]);
+
   // ── Sessionen är slut. Bara det lådlösa flödets Supabase-skrivningar sker
   // här — box-ursprung är redan sparat (SessionContext skrev till outboxen
   // och ackade innan den dispatchade SESSION_ENDED). Reset och navigering
@@ -766,7 +845,9 @@ function PausingScreen() {
 
     (async () => {
       const durationSeconds = Math.round(state.lastEnded!.durationMs / 1000);
-      const now = new Date().toISOString();
+      // En sekund före midnatt om pausen passerade den (`dayEndMs`).
+      const endMs = dayEndMs();
+      const now = new Date(endMs).toISOString();
       // Cirkelns ledger dedupar på pause_sessions-id, så raden måste skrivas
       // klart innan pausen kan räknas in i veckan och i stegen.
       let sessionId: string | null = null;
@@ -783,7 +864,7 @@ function PausingScreen() {
         }
         const { data: inserted, error } = await supabase.from('pause_sessions').insert({
           user_id: user.id,
-          started_at: new Date(Date.now() - durationSeconds * 1000).toISOString(),
+          started_at: new Date(endMs - durationSeconds * 1000).toISOString(),
           ended_at: now,
           duration_seconds: durationSeconds,
           intention: intentionLabel,
@@ -800,6 +881,21 @@ function PausingScreen() {
       if (shared?.role === 'host') await closePauseInvites(shared.id, durationSeconds);
       else if (shared?.role === 'guest') await finishPauseInvite(shared.id, durationSeconds);
       await logPause(durationSeconds, 'session', state.category || undefined);
+      // Natten efter midnatt: en sömnrad från midnatt (eller läggningen) till
+      // lyftet. Inga uppvaknanden — lyftet avslutade den. Kortare än
+      // SLEEP_MIN_SECONDS sparas inte (saveSleepSession).
+      const night = nightRef.current;
+      if (night && user?.id) {
+        const nightEnd = nightEndRef.current ?? Date.now();
+        await saveSleepSession({
+          userId: user.id,
+          startedAt: new Date(night.startMs),
+          endedAt: new Date(nightEnd),
+          durationSeconds: (nightEnd - night.startMs) / 1000,
+          wakeCount: 0,
+          awakeSeconds: 0,
+        });
+      }
       await clearSessionCheckpoint();
       if (state.lastEnded!.completed && sessionId) recordPauseInCircle(sessionId, state.category);
     })();
@@ -813,18 +909,21 @@ function PausingScreen() {
     return h > 0 ? `${h}:${m}:${s}` : `${m}:${s}`;
   };
 
-  const finishPause = (how: 'manual' | 'auto' | 'cap' = 'manual') => {
+  // `durationMs` skrivs bara över av natten efter midnatt: då är pausens
+  // längd dagdelen, och natten sparas för sig (se avslutet ovan).
+  const finishPause = (how: 'manual' | 'auto' | 'cap' | 'midnight' | 'night' = 'manual', durationMs = elapsedMs) => {
     if (autoEndFiredRef.current) return;
     autoEndFiredRef.current = true;
     // Ett tryck på Finish, till skillnad från en regulate-paus som tar slut
     // av sig själv. Båda ger ett pause_completed i _layout.tsx; bara det ena
     // var ett beslut.
     if (isSleep) track('sleep_finished', { how, duration_seconds: Math.round(elapsedMs / 1000) });
+    else if (how === 'midnight' || how === 'night') track('pause_ended_at_midnight', { how, duration_seconds: Math.round(durationMs / 1000) });
     else track('pause_finished_manually', { duration_seconds: Math.round(elapsedMs / 1000) });
     dispatch({
       type: 'SESSION_ENDED',
       seq: state.seq ?? '',
-      durationMs: elapsedMs,
+      durationMs,
       completed: true,
     });
   };
@@ -878,7 +977,8 @@ function PausingScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const titleText = isSleep ? 'Sleeping...' : isRegulate ? 'Regulate in progress...' : 'Pausing...';
+  // Efter midnatt är en dagpaus en natt, och skärmen säger det.
+  const titleText = isSleep || nightRef.current ? 'Sleeping...' : isRegulate ? 'Regulate in progress...' : 'Pausing...';
   // Samma ord, samma röda knapp och samma håll för natten som för pausen —
   // att avsluta ska inte se ut som att börja. Bara skärmläsaren får veta
   // vad det är som avslutas.

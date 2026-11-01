@@ -73,13 +73,16 @@ export async function getSleepNights(limit = 30): Promise<SleepNight[]> {
 }
 
 
-/** Startar en natt. Samma skärm som en lådlös paus, med `pauseType: 'sleep'`. */
-export function startSleep() {
-  track('sleep_started');
-  router.push({
-    pathname: '/pausing',
-    params: { mode: 'sleep', category: '', withPod: 'false', pauseType: 'sleep', targetSeconds: '0' },
-  });
+/**
+ * Startar en natt. Samma skärm som en lådlös paus, med `pauseType: 'sleep'`.
+ * `via` säger varifrån — en natt som startades av en pausväg efter midnatt
+ * (`'night_hours'`) ska gå att skilja från ett tryck på SLEEP.
+ */
+export function startSleep(how: 'push' | 'replace' = 'push', via: 'sleep_button' | 'night_hours' = 'sleep_button') {
+  track('sleep_started', { via });
+  const params = { mode: 'sleep', category: '', withPod: 'false', pauseType: 'sleep', targetSeconds: '0' };
+  if (how === 'replace') router.replace({ pathname: '/pausing', params });
+  else router.push({ pathname: '/pausing', params });
 }
 
 export type SleepRecord = {

@@ -42,6 +42,10 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+// WebServer före TFT_eSPI: TFT_eSPI läser FS.h med FS_NO_GLOBALS, och då
+// hittar WebServer inte FS om den kommer efter.
+#include <WebServer.h>
+#include <DNSServer.h>
 #include <TFT_eSPI.h>
 #include <Preferences.h>
 #include <SPI.h>
@@ -305,12 +309,12 @@ const char* phaseName(Phase p) {
 }
 
 unsigned long phaseStartMs = 0;
-extern char lastDrawnPairCode[11];
+extern char lastDrawnQr[64];
 
 void setPhase(Phase p) {
   phase = p;
   phaseStartMs = millis();
-  lastDrawnPairCode[0] = 0;   // QR-bilden ritas bara om vid byte — tvinga det här
+  lastDrawnQr[0] = 0;   // QR-bilden ritas bara om vid byte — tvinga det här
 }
 
 uint32_t      activeSeq        = 0;
@@ -427,20 +431,313 @@ bool          uploadBusy      = false;
 
 volatile bool wifiUp = false;
 
+// ─── WiFi: sparade nät och inställningsnätet ────────────────
+//
+// Lådan kommer ihåg upp till fem nät (NVS, namnrymden "wifi"), senast
+// inställda först, plus nätet i secrets.h om det finns ett. Den letar efter
+// alla och ansluter till det starkaste den hittar.
+//
+// Hittar den inget startar den ett eget öppet nät, "PausePod-XXXX". Den som
+// ansluter till det med mobilen får upp en sida där man väljer WiFi och
+// skriver lösenordet (som när man loggar in på ett café-WiFi). Skärmen visar
+// en QR-kod som ansluter mobilen till nätet. När lådan väl är uppkopplad
+// stängs nätet igen. Så kan lådan ställas in hemma hos vem som helst utan
+// dator och utan att koden laddas om.
+
+const int  WIFI_SAVED_MAX = 5;
+const unsigned long WIFI_RETRY_MS     = 20000;  // nere: leta igen så här ofta
+const unsigned long PORTAL_LINGER_MS  = 20000;  // uppkopplad: låt sidan hinna svara
+const unsigned long WIFI_OK_SHOW_MS   = 5000;   // "CONNECTED" på skärmen
+
+struct WifiCred { char ssid[33]; char pass[65]; };
+WifiCred wifiSaved[WIFI_SAVED_MAX];
+int      wifiSavedCount = 0;
+Preferences wifiPrefs;
+
+// Inställningsnätet. Startas och stängs bara i loopen; nätverks-tasken
+// läser bara flaggorna.
+WebServer portalServer(80);
+DNSServer portalDns;
+volatile bool portalActive     = false;
+volatile bool wifiNeedsSetup   = false;  // tasken: inget känt nät gick att nå
+volatile bool connectRequested = false;  // sidan: anslut nu till det nya nätet
+volatile int  wifiSetupResult  = 0;      // 0 inget, 1 ansluter, 2 klart, 3 misslyckades
+char          apName[24]       = "PausePod";
+char          connectedSsid[33] = "";
+unsigned long portalStopAt     = 0;
+unsigned long wifiOkShownAt    = 0;
+
+void loadWifiSaved() {
+  wifiPrefs.begin("wifi", true);
+  int n = wifiPrefs.getInt("n", 0);
+  wifiSavedCount = 0;
+  for (int i = 0; i < n && i < WIFI_SAVED_MAX; i++) {
+    char k[4];
+    sprintf(k, "s%d", i);
+    wifiPrefs.getString(k, wifiSaved[wifiSavedCount].ssid, sizeof(wifiSaved[0].ssid));
+    sprintf(k, "p%d", i);
+    wifiPrefs.getString(k, wifiSaved[wifiSavedCount].pass, sizeof(wifiSaved[0].pass));
+    if (wifiSaved[wifiSavedCount].ssid[0]) wifiSavedCount++;
+  }
+  wifiPrefs.end();
+  Serial.printf("WiFi: %d sparade nät\n", wifiSavedCount);
+}
+
+void storeWifiSaved() {
+  wifiPrefs.begin("wifi", false);
+  wifiPrefs.putInt("n", wifiSavedCount);
+  for (int i = 0; i < wifiSavedCount; i++) {
+    char k[4];
+    sprintf(k, "s%d", i);
+    wifiPrefs.putString(k, wifiSaved[i].ssid);
+    sprintf(k, "p%d", i);
+    wifiPrefs.putString(k, wifiSaved[i].pass);
+  }
+  wifiPrefs.end();
+}
+
+// Lägger nätet först. Fanns det redan byts lösenordet; listan hålls på fem.
+void addWifiSaved(const char* ssid, const char* pass) {
+  xSemaphoreTake(netMutex, portMAX_DELAY);
+  WifiCred c;
+  strncpy(c.ssid, ssid, sizeof(c.ssid) - 1); c.ssid[sizeof(c.ssid) - 1] = 0;
+  strncpy(c.pass, pass, sizeof(c.pass) - 1); c.pass[sizeof(c.pass) - 1] = 0;
+  WifiCred out[WIFI_SAVED_MAX];
+  int n = 0;
+  out[n++] = c;
+  for (int i = 0; i < wifiSavedCount && n < WIFI_SAVED_MAX; i++) {
+    if (strcmp(wifiSaved[i].ssid, c.ssid) != 0) out[n++] = wifiSaved[i];
+  }
+  memcpy(wifiSaved, out, sizeof(out));
+  wifiSavedCount = n;
+  xSemaphoreGive(netMutex);
+  storeWifiSaved();
+}
+
+void forgetWifiSaved() {
+  xSemaphoreTake(netMutex, portMAX_DELAY);
+  wifiSavedCount = 0;
+  xSemaphoreGive(netMutex);
+  storeWifiSaved();
+}
+
+bool tryConnect(const char* ssid, const char* pass, unsigned long timeoutMs) {
+  WiFi.begin(ssid, pass);
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < timeoutMs) delay(200);
+  return WiFi.status() == WL_CONNECTED;
+}
+
+// Letar efter alla kända nät och ansluter till det starkaste. Körs bara i
+// nätverks-tasken.
 bool ensureWifi() {
   if (WiFi.status() == WL_CONNECTED) { wifiUp = true; return true; }
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) delay(200);
-  wifiUp = (WiFi.status() == WL_CONNECTED);
-  if (wifiUp) Serial.println("WiFi OK: " + WiFi.localIP().toString());
-  else        Serial.println("WiFi: kunde inte ansluta");
+  WiFi.mode(portalActive ? WIFI_AP_STA : WIFI_STA);
+
+  WifiCred cands[WIFI_SAVED_MAX + 1];
+  int n = 0;
+  xSemaphoreTake(netMutex, portMAX_DELAY);
+  for (int i = 0; i < wifiSavedCount; i++) cands[n++] = wifiSaved[i];
+  xSemaphoreGive(netMutex);
+#ifdef WIFI_SSID
+  if (strlen(WIFI_SSID) > 0) {
+    bool dup = false;
+    for (int i = 0; i < n; i++) if (strcmp(cands[i].ssid, WIFI_SSID) == 0) dup = true;
+    if (!dup) {
+      strncpy(cands[n].ssid, WIFI_SSID, sizeof(cands[n].ssid) - 1); cands[n].ssid[sizeof(cands[n].ssid) - 1] = 0;
+      strncpy(cands[n].pass, WIFI_PASSWORD, sizeof(cands[n].pass) - 1); cands[n].pass[sizeof(cands[n].pass) - 1] = 0;
+      n++;
+    }
+  }
+#endif
+  if (n == 0) {
+    Serial.println("WiFi: inga nät inställda");
+    wifiUp = false;
+    return false;
+  }
+
+  int found = WiFi.scanNetworks();
+  int best = -1, bestRssi = -1000;
+  for (int i = 0; i < found; i++) {
+    String seen = WiFi.SSID(i);
+    for (int c = 0; c < n; c++) {
+      if (seen == cands[c].ssid && WiFi.RSSI(i) > bestRssi) { best = c; bestRssi = WiFi.RSSI(i); }
+    }
+  }
+  WiFi.scanDelete();
+  if (found < 0 && n > 0) best = 0;   // sökningen misslyckades: prova det senaste
+
+  if (best < 0) {
+    Serial.println("WiFi: inget känt nät i närheten");
+    wifiUp = false;
+    return false;
+  }
+  wifiUp = tryConnect(cands[best].ssid, cands[best].pass, 12000);
+  if (wifiUp) {
+    strncpy(connectedSsid, cands[best].ssid, sizeof(connectedSsid) - 1);
+    Serial.printf("WiFi OK: %s (%s)\n", connectedSsid, WiFi.localIP().toString().c_str());
+  } else {
+    Serial.printf("WiFi: kunde inte ansluta till %s\n", cands[best].ssid);
+  }
   return wifiUp;
+}
+
+// ── Inställningsnätets sida ──
+
+String htmlEscape(const String& in) {
+  String out;
+  for (unsigned int i = 0; i < in.length(); i++) {
+    char c = in[i];
+    if (c == '<') out += "&lt;";
+    else if (c == '>') out += "&gt;";
+    else if (c == '&') out += "&amp;";
+    else if (c == '"') out += "&quot;";
+    else out += c;
+  }
+  return out;
+}
+
+// Samma uttryck som joinpausepod.com: marinblått, ljusblått, tjocka versaler.
+const char PORTAL_HEAD[] PROGMEM = R"HTML(<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>PausePod WiFi</title>
+<style>
+body{margin:0;background:#0a1330;color:#eef3ff;font:16px/1.45 system-ui,-apple-system,Arial,sans-serif;padding:28px 20px}
+.w{max-width:420px;margin:0 auto}
+.k{color:#9ccbff;font:900 13px Arial Black,Arial,sans-serif;letter-spacing:.08em;text-transform:uppercase;margin:0 0 6px}
+h1{font:900 30px/1.05 "Arial Black",Arial,sans-serif;text-transform:uppercase;letter-spacing:-.01em;margin:0 0 18px}
+p{color:#b3c1de;margin:0 0 18px}
+label{display:block;font-weight:700;margin:16px 0 6px}
+select,input{width:100%;box-sizing:border-box;background:#111c3f;color:#eef3ff;border:2px solid #1c2b58;border-radius:12px;padding:13px 14px;font-size:16px}
+button{width:100%;margin-top:22px;background:#9ccbff;color:#0a1330;border:0;border-radius:999px;padding:15px;font:900 15px "Arial Black",Arial,sans-serif;text-transform:uppercase;letter-spacing:.04em}
+.small{font-size:14px;color:#b3c1de}
+.link{background:none;color:#9ccbff;font:700 14px system-ui,Arial;text-transform:none;padding:8px;margin-top:28px}
+</style></head><body><div class="w">)HTML";
+
+void sendPortalPage(const String& body) {
+  String page = FPSTR(PORTAL_HEAD);
+  page += body;
+  page += "</div></body></html>";
+  portalServer.send(200, "text/html; charset=utf-8", page);
+}
+
+void handlePortalRoot() {
+  // Sökningen tar ett par sekunder; mobilen väntar så länge.
+  int found = WiFi.scanNetworks();
+  String opts;
+  String seen = "|";
+  for (int i = 0; i < found; i++) {
+    String ssid = WiFi.SSID(i);
+    if (ssid.length() == 0 || seen.indexOf("|" + ssid + "|") >= 0) continue;
+    seen += ssid + "|";
+    opts += "<option>" + htmlEscape(ssid) + "</option>";
+  }
+  WiFi.scanDelete();
+
+  String body;
+  body += "<p class=\"k\">PausePod</p><h1>Connect<br>to WiFi</h1>";
+  if (wifiSetupResult == 3) body += "<p>That didn't work. Check the password and try again.</p>";
+  else body += "<p>The box needs WiFi to save your pauses. 2.4 GHz networks only.</p>";
+  body += "<form method=\"post\" action=\"/save\">";
+  body += "<label>Network</label><select name=\"ssid\">" + opts + "</select>";
+  body += "<label>Or type the name</label><input name=\"ssid2\" autocapitalize=\"none\" autocorrect=\"off\">";
+  body += "<label>Password</label><input name=\"pass\" type=\"password\" autocapitalize=\"none\" autocorrect=\"off\">";
+  body += "<button type=\"submit\">Connect</button></form>";
+  body += "<form method=\"post\" action=\"/forget\"><button class=\"link\" type=\"submit\">Forget saved networks</button></form>";
+  sendPortalPage(body);
+}
+
+void handlePortalSave() {
+  String ssid = portalServer.arg("ssid2");
+  ssid.trim();
+  if (ssid.length() == 0) ssid = portalServer.arg("ssid");
+  String pass = portalServer.arg("pass");
+  if (ssid.length() == 0) {
+    portalServer.sendHeader("Location", "/");
+    portalServer.send(302, "text/plain", "");
+    return;
+  }
+  addWifiSaved(ssid.c_str(), pass.c_str());
+  Serial.printf("WiFi: nytt nät från sidan: %s\n", ssid.c_str());
+  wifiSetupResult = 1;
+  connectRequested = true;
+  sendPortalPage("<p class=\"k\">PausePod</p><h1>Connecting</h1>"
+                 "<p>Look at the box. It says CONNECTED when it's done, and this network closes.</p>"
+                 "<p class=\"small\">If the box shows this page again, the password was wrong.</p>");
+}
+
+void handlePortalForget() {
+  forgetWifiSaved();
+  Serial.println("WiFi: sparade nät glömda");
+  portalServer.sendHeader("Location", "/");
+  portalServer.send(302, "text/plain", "");
+}
+
+// Allt annat (mobilernas egna "finns det internet?"-frågor) skickas till
+// sidan. Det är så sidan dyker upp av sig själv när mobilen ansluter.
+void handlePortalOther() {
+  portalServer.sendHeader("Location", String("http://") + WiFi.softAPIP().toString() + "/");
+  portalServer.send(302, "text/plain", "");
+}
+
+bool portalRoutesAdded = false;
+
+void startPortal() {
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP(apName);
+  delay(100);
+  portalDns.start(53, "*", WiFi.softAPIP());
+  if (!portalRoutesAdded) {
+    portalServer.on("/", HTTP_GET, handlePortalRoot);
+    portalServer.on("/save", HTTP_POST, handlePortalSave);
+    portalServer.on("/forget", HTTP_POST, handlePortalForget);
+    portalServer.onNotFound(handlePortalOther);
+    portalRoutesAdded = true;
+  }
+  portalServer.begin();
+  portalActive = true;
+  portalStopAt = 0;
+  lastDrawnQr[0] = 0;
+  Serial.printf("WiFi: inställningsnätet %s är uppe (%s)\n", apName, WiFi.softAPIP().toString().c_str());
+}
+
+void stopPortal() {
+  portalServer.stop();
+  portalDns.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+  portalActive = false;
+  wifiNeedsSetup = false;
+  lastDrawnQr[0] = 0;
+  Serial.println("WiFi: inställningsnätet stängt");
+}
+
+// Körs i loopen: öppnar nätet när inget känt nät nås, stänger det en stund
+// efter att lådan kommit upp.
+void handlePortal() {
+  if (portalActive) {
+    portalDns.processNextRequest();
+    portalServer.handleClient();
+  }
+  unsigned long now = millis();
+  if (!portalActive && wifiNeedsSetup && !wifiUp) startPortal();
+  if (portalActive && wifiUp && portalStopAt == 0) portalStopAt = now + PORTAL_LINGER_MS;
+  if (portalActive && portalStopAt != 0 && (long)(now - portalStopAt) >= 0) stopPortal();
+  if (wifiSetupResult == 2 && wifiOkShownAt == 0) wifiOkShownAt = now;
+  if (wifiOkShownAt != 0 && now - wifiOkShownAt > WIFI_OK_SHOW_MS) {
+    wifiSetupResult = 0;
+    wifiOkShownAt = 0;
+  }
+}
+
+// En telefon som står på inställningssidan ska inte tappa nätet för att
+// lådan letar i bakgrunden (sökningen byter kanal en stund).
+bool phoneOnPortal() {
+  return portalActive && WiFi.softAPgetStationNum() > 0;
 }
 
 // POST till en edge-funktion. Returnerar HTTP-koden (0 = inget svar).
 int postToFunction(const char* fn, const String& body, String& response) {
+  if (WiFi.status() != WL_CONNECTED && phoneOnPortal()) return 0;
   if (!ensureWifi()) return 0;
   WiFiClientSecure client;
   client.setInsecure();   // PROTOTYP: certifikatet kontrolleras inte. setCACert före lansering.
@@ -514,7 +811,8 @@ void doUpload() {
 }
 
 void netTask(void*) {
-  ensureWifi();
+  if (!ensureWifi()) wifiNeedsSetup = true;
+  unsigned long lastWifiTry = millis();
   for (;;) {
     if (lookupRequested) {
       lookupRequested = false;
@@ -526,6 +824,15 @@ void netTask(void*) {
       uploadDone = true;
     } else {
       if (WiFi.status() != WL_CONNECTED) wifiUp = false;
+      bool requested = connectRequested;
+      if (requested || (!wifiUp && !phoneOnPortal() && millis() - lastWifiTry > WIFI_RETRY_MS)) {
+        connectRequested = false;
+        lastWifiTry = millis();
+        if (requested) WiFi.disconnect();   // byt till det nya nätet även om ett gammalt nås
+        bool ok = ensureWifi();
+        if (requested) wifiSetupResult = ok ? 2 : 3;
+        if (!ok) wifiNeedsSetup = true;
+      }
       vTaskDelay(pdMS_TO_TICKS(30));
     }
   }
@@ -839,7 +1146,7 @@ void renderOffline() {
   sprite.setTextDatum(MC_DATUM);
   sprite.setFreeFont(&FreeSansBold18pt7b);
   drawHeavy("NO CONNECTION", CENTER_X, 98, INK);
-  drawBody("Trying again.", CENTER_X, 134, INK_2);
+  drawBody(portalActive ? "Lift the phone to set up WiFi." : "Trying again.", CENTER_X, 134, INK_2);
   sprite.pushSprite(0, 0);
 }
 
@@ -867,71 +1174,130 @@ void drawQrToSprite(esp_qrcode_handle_t qr) {
   }
 }
 
-// Ny tagg: QR-koden till vänster, och koden att skriva in till höger.
-void renderPairing() {
+// QR-koden till vänster och en spalt till höger: etikett, två rader rubrik,
+// en rad text och en pill. Används av en ny tagg och av WiFi-inställningen.
+void renderQrPanel(const char* qrText, const char* kicker, const char* h1, const char* h2,
+                   const char* small, const char* pillText) {
   sprite.fillSprite(BG);
   esp_qrcode_config_t cfg = ESP_QRCODE_CONFIG_DEFAULT();
   cfg.display_func = drawQrToSprite;
   cfg.max_qrcode_version = 10;
   cfg.qrcode_ecc_level = ESP_QRCODE_ECC_LOW;
-  esp_qrcode_generate(&cfg, pairUrl[0] ? pairUrl : PAIR_URL_FALLBACK);
+  esp_qrcode_generate(&cfg, qrText);
 
   const int x = QR_X + QR_AREA + 16;          // högerspaltens vänsterkant
   const int colW = SCREEN_W - x - 12;
   sprite.setTextDatum(TL_DATUM);
-  drawKicker("NEW TAG", x, 16, HUE);
+  drawKicker(kicker, x, 16, HUE);
 
   sprite.setFreeFont(&FreeSansBold18pt7b);
-  if (sprite.textWidth("SCAN TO") + 1 > colW) sprite.setFreeFont(&FreeSansBold12pt7b);
-  drawHeavy("SCAN TO", x, 40, INK);
-  drawHeavy("PAIR", x, 72, INK);
+  if (sprite.textWidth(h1) + 1 > colW || sprite.textWidth(h2) + 1 > colW) sprite.setFreeFont(&FreeSansBold12pt7b);
+  drawHeavy(h1, x, 40, INK);
+  drawHeavy(h2, x, 72, INK);
 
-  drawBody("Or type the code:", x, 104, INK_2);
+  drawBody(small, x, 104, INK_2);
 
-  // Koden i en pill, bokstäverna lite isär så att de går att läsa av.
+  // Pillen: koden med bokstäverna lite isär, eller ett längre namn i mindre stil.
   const int pillCy = 145, pillH = 32;
-  drawPill(x + colW / 2, pillCy, colW, pillH, SURF, LINE);
   sprite.setFreeFont(&FreeSansBold12pt7b);
-  const int track = 3;
-  int len = strlen(pairCode);
+  const int len = strlen(pillText);
+  int track = 3;
   int total = 0;
   char ch[2] = {0, 0};
-  for (int i = 0; i < len; i++) { ch[0] = pairCode[i]; total += sprite.textWidth(ch) + (i ? track : 0); }
-  int cx = x + (colW - total) / 2;
-  sprite.setTextDatum(ML_DATUM);
-  sprite.setTextColor(INK);
-  for (int i = 0; i < len; i++) {
-    ch[0] = pairCode[i];
-    sprite.drawString(ch, cx, pillCy);
-    cx += sprite.textWidth(ch) + track;
+  for (int i = 0; i < len; i++) { ch[0] = pillText[i]; total += sprite.textWidth(ch) + (i ? track : 0); }
+  if (total > colW - 20) {
+    // Ett långt namn (nätets): pillen går ut till skärmkanten, texten i 9 pt.
+    const int px = x - 6, pw = SCREEN_W - 4 - px;
+    drawPill(px + pw / 2, pillCy, pw, pillH, SURF, LINE);
+    sprite.setFreeFont(&FreeSansBold9pt7b);
+    if (sprite.textWidth(pillText) > pw - 20) sprite.setFreeFont(&FreeSans9pt7b);
+    sprite.setTextDatum(MC_DATUM);
+    sprite.setTextColor(INK);
+    sprite.drawString(pillText, px + pw / 2, pillCy);
+  } else {
+    drawPill(x + colW / 2, pillCy, colW, pillH, SURF, LINE);
+    sprite.setTextColor(INK);
+    int cx = x + (colW - total) / 2;
+    sprite.setTextDatum(ML_DATUM);
+    for (int i = 0; i < len; i++) {
+      ch[0] = pillText[i];
+      sprite.drawString(ch, cx, pillCy);
+      cx += sprite.textWidth(ch) + track;
+    }
   }
   sprite.pushSprite(0, 0);
 }
 
+// Ny tagg: QR-koden till appen, och koden att skriva in.
+void renderPairing() {
+  renderQrPanel(pairUrl[0] ? pairUrl : PAIR_URL_FALLBACK,
+                "NEW TAG", "SCAN TO", "PAIR", "Or type the code:", pairCode);
+}
+
+// Inget känt WiFi: QR-koden ansluter mobilen till lådans eget nät, och där
+// dyker inställningssidan upp av sig själv.
+void renderWifiSetup() {
+  char qr[64];
+  snprintf(qr, sizeof(qr), "WIFI:T:nopass;S:%s;;", apName);
+  renderQrPanel(qr, "NO WIFI", "SCAN TO", "SET UP",
+                wifiSetupResult == 3 ? "Wrong password?" : "Or join the WiFi:", apName);
+}
+
+// Inställningen gick igenom.
+void renderWifiOk() {
+  sprite.fillSprite(BG);
+  drawRing(CENTER_X, 52, 24, 5, GREEN);
+  drawCheck(CENTER_X, 52, 24, 6, 1.0, GREEN);
+  sprite.setTextDatum(MC_DATUM);
+  sprite.setFreeFont(&FreeSansBold18pt7b);
+  drawHeavy("CONNECTED", CENTER_X, 108, INK);
+  drawBody(connectedSsid, CENTER_X, 142, INK_2);
+  sprite.pushSprite(0, 0);
+}
+
 // IDLE visar det taggen säger: inget, kollar, hej, QR eller ingen anslutning.
-// QR-bilden ritas om bara när koden byts — den räknas inte fram 30 gånger i
-// sekunden.
-char lastDrawnPairCode[11] = "";
+// Utan tagg och utan WiFi visar den hur lådan ställs in. QR-bilderna ritas
+// om bara när innehållet byts — de räknas inte fram 30 gånger i sekunden.
+char lastDrawnQr[64] = "";
+
+// Ritar en QR-skärm bara om nyckeln är ny.
+bool qrNeedsDraw(const char* key) {
+  if (strcmp(lastDrawnQr, key) == 0) return false;
+  strncpy(lastDrawnQr, key, sizeof(lastDrawnQr) - 1);
+  lastDrawnQr[sizeof(lastDrawnQr) - 1] = 0;
+  return true;
+}
 
 void renderIdle() {
-  if (!tagPresent || tagInfo == TI_NONE) { lastDrawnPairCode[0] = 0; renderLogo(); return; }
+  if (!tagPresent || tagInfo == TI_NONE) {
+    if (wifiSetupResult == 2 && wifiOkShownAt != 0) { lastDrawnQr[0] = 0; renderWifiOk(); return; }
+    if (portalActive && !wifiUp) {
+      char key[48];
+      snprintf(key, sizeof(key), "wifi:%s:%d", apName, wifiSetupResult == 3 ? 3 : 0);
+      if (qrNeedsDraw(key)) renderWifiSetup();
+      return;
+    }
+    lastDrawnQr[0] = 0;
+    renderLogo();
+    return;
+  }
   switch (tagInfo) {
     case TI_PENDING:
-      lastDrawnPairCode[0] = 0;
+      lastDrawnQr[0] = 0;
       renderChecking();
       break;
     case TI_KNOWN:
-      lastDrawnPairCode[0] = 0;
+      lastDrawnQr[0] = 0;
       renderHello();
       break;
-    case TI_UNKNOWN:
-      if (strcmp(lastDrawnPairCode, pairCode) != 0) {
-        renderPairing();
-        strncpy(lastDrawnPairCode, pairCode, sizeof(lastDrawnPairCode));
-      }
+    case TI_UNKNOWN: {
+      char key[24];
+      snprintf(key, sizeof(key), "pair:%s", pairCode);
+      if (qrNeedsDraw(key)) renderPairing();
       break;
+    }
     case TI_OFFLINE:
-      lastDrawnPairCode[0] = 0;
+      lastDrawnQr[0] = 0;
       renderOffline();
       break;
     default:
@@ -1454,6 +1820,10 @@ void setup() {
 
   loadPersisted();
   recoverCheckpoint();
+  loadWifiSaved();
+  // Inställningsnätet heter efter lådans chip, t.ex. PausePod-A7AC.
+  snprintf(apName, sizeof(apName), "PausePod-%s",
+           boxIdBle.length() >= 4 ? boxIdBle.substring(boxIdBle.length() - 4).c_str() : "0000");
 
   SPI.begin(RC522_SCK_PIN, RC522_MISO_PIN, RC522_MOSI_PIN, RC522_SS_PIN);
   startReader();
@@ -1488,6 +1858,7 @@ void setup() {
 }
 
 void loop() {
+  handlePortal();
   pollTag();
   handleLid();
   handleLookup();

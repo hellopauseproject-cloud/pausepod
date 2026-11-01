@@ -687,6 +687,12 @@ bool portalRoutesAdded = false;
 
 void startPortal() {
   WiFi.mode(WIFI_AP_STA);
+  // DNS måste anges uttryckligen: utan det delar ESP32 inte ut någon DNS till
+  // mobilen, mobilens "finns det internet?"-koll når aldrig lådan, och mobilen
+  // kopplar ner och byter till ett annat nät. Med lådan som DNS svarar den
+  // på kollen med sin egen sida, och mobilen visar "Logga in på nätverket".
+  const IPAddress apIp(192, 168, 4, 1);
+  WiFi.softAPConfig(apIp, apIp, IPAddress(255, 255, 255, 0), IPAddress(192, 168, 4, 2), apIp);
   WiFi.softAP(apName);
   delay(100);
   portalDns.start(53, "*", WiFi.softAPIP());
@@ -694,6 +700,14 @@ void startPortal() {
     portalServer.on("/", HTTP_GET, handlePortalRoot);
     portalServer.on("/save", HTTP_POST, handlePortalSave);
     portalServer.on("/forget", HTTP_POST, handlePortalForget);
+    // Mobilernas egna kontroller (Android, iPhone, Windows): svara med en
+    // omdirigering till sidan, så att de förstår att det är ett inloggningsnät.
+    portalServer.on("/generate_204", handlePortalOther);
+    portalServer.on("/gen_204", handlePortalOther);
+    portalServer.on("/hotspot-detect.html", handlePortalOther);
+    portalServer.on("/library/test/success.html", handlePortalOther);
+    portalServer.on("/connecttest.txt", handlePortalOther);
+    portalServer.on("/ncsi.txt", handlePortalOther);
     portalServer.onNotFound(handlePortalOther);
     portalRoutesAdded = true;
   }
